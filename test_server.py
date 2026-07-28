@@ -1090,9 +1090,22 @@ def test_run_agy_json_continue_falls_back_to_last_conversations(fake_agy_json, l
     assert args[args.index("--conversation") + 1] == "from-file"
 
 
-def test_recorded_conv_id_is_case_insensitive_on_paths():
+def test_recorded_conv_id_round_trips_the_same_path():
     server._record_conv_id("C:\\Proj", "c9")
-    assert server._recorded_conv_id("c:\\proj") == "c9"
+    assert server._recorded_conv_id("C:\\Proj") == "c9"
+    assert server._recorded_conv_id("C:\\Other") is None
+
+
+def test_recorded_conv_id_case_matching_follows_the_platform():
+    """Keys go through os.path.normcase, so matching mirrors the real filesystem.
+
+    Case-insensitive on Windows; case-SENSITIVE on POSIX, where `/Proj` and `/proj`
+    genuinely are different directories. Asserting one behaviour on both platforms
+    is what broke CI on macOS/Linux while passing on Windows.
+    """
+    server._record_conv_id("C:\\Proj", "c9")
+    hit = server._recorded_conv_id("c:\\proj")
+    assert hit == ("c9" if os.name == "nt" else None)
 
 
 def test_run_agy_json_failure_status_without_response_raises(fake_agy_json, last_conv_file):
