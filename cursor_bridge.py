@@ -6,7 +6,17 @@ Fourth backend alongside the agy bridge (server.py), the Codex bridge
 kind like codex/copilot: `cursor-agent -p "<prompt>" --output-format text` runs a
 prompt non-interactively and writes the clean final answer to STDOUT, then exits.
 No transcript-scraping — we read the answer from stdout. Verified against
-cursor-agent 2026.07.08 on Windows.
+cursor-agent 2026.07.23 on Windows (bumped from 2026.07.08). Everything the bridge
+depends on structurally still holds — `create-chat` mints an id, `models` lists,
+`status` reports auth, every flag we pass is still in --help, and the on-disk
+chats/<id>/meta.json cwd layout the continue fallback reads is unchanged. The one
+real change was the MODEL LIST: 2026.07.23 reshuffled it (193 ids), retiring
+`sonnet-4-thinking` and the bare `claude-opus-4-8` that our docs named as examples,
+and it now bakes effort/speed into the id (…-low/-high/-xhigh/-max, each with a
+-fast twin). See validate_model for why that also loosened validation to accept a
+family base. NOTE: a live agent turn could not be re-verified on 2026.07.23 — the
+account was at its Cursor usage limit — so the run path itself is confirmed only by
+structure and by the bridge cleanly surfacing cursor's own limit error.
 
 CONTINUE / RESUME. cursor-agent has a `create-chat` command that mints a new chat
 and prints its id, plus a `--resume <chatId>` flag that resumes an existing chat.
@@ -325,16 +335,30 @@ def list_models() -> list[str]:
 def validate_model(model: Optional[str]) -> Optional[str]:
     """Return `model` if it's a known cursor model id, else raise ValueError.
 
-    Accepts parameterized ids like `claude-opus-4-8[context=1m]` by checking the
-    base id before the bracket. Skips validation (returns as-is) when the model
-    list can't be fetched, mirroring agy's lenient fallback.
+    Accepts parameterized ids like `claude-opus-4-8[context=1m,effort=high]` by
+    checking the base id before the bracket. Skips validation (returns as-is) when
+    the model list can't be fetched, mirroring agy's lenient fallback.
+
+    FAMILY PREFIXES. An exact match is not required: a base that is the prefix of a
+    listed id (`base` + "-") is accepted too. `cursor-agent models` enumerates
+    PRE-COMPOSED combinations — claude-opus-4-8-high, -xhigh, -thinking-max, each
+    with a -fast twin — and never the bare `claude-opus-4-8`, yet cursor's own
+    --help documents exactly that bare id as the base for the bracket syntax
+    (`claude-opus-4-8[context=1m,effort=high,fast=false]`). Requiring an exact match
+    therefore rejected a form cursor itself advertises, and a wrong rejection is
+    worse than a passed-through typo: it blocks a valid call with no workaround,
+    while a typo merely costs one call and earns cursor's own authoritative error.
+    The prefix rule stays tight enough to keep the guard useful — it demands a real
+    family, so `gpt-5` still fails against `gpt-5.2` (no `gpt-5-` id exists) and a
+    retired name like `sonnet-4-thinking` still fails outright.
     """
     if model is None or not str(model).strip():
         return None
     model = str(model).strip()
     base = model.split("[", 1)[0]
     models = list_models()
-    if models and base not in models:
+    known = base in models or any(m.startswith(base + "-") for m in models)
+    if models and not known:
         sample = ", ".join(models[:8])
         raise ValueError(
             f"unknown cursor model {model!r}; see `cursor-agent models`. "

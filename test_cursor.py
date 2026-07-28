@@ -304,6 +304,78 @@ def test_validate_model_allows_parameterized(monkeypatch):
     )
 
 
+def test_validate_model_accepts_a_family_base_not_listed_verbatim(monkeypatch):
+    """cursor lists PRE-COMPOSED ids but documents the bare base for the bracket form.
+
+    `cursor-agent models` enumerates claude-opus-4-8-high / -xhigh / -thinking-max
+    (each with a -fast twin) and never the bare `claude-opus-4-8`, yet cursor's own
+    --help advertises `claude-opus-4-8[context=1m,effort=high,fast=false]`. Demanding
+    an exact match rejected a form cursor itself documents.
+    """
+    listed = [
+        "auto",
+        "gpt-5.2",
+        "claude-opus-4-8-high",
+        "claude-opus-4-8-thinking-max-fast",
+    ]
+    monkeypatch.setattr(cursor_bridge, "list_models", lambda: listed)
+    assert cursor_bridge.validate_model("claude-opus-4-8[context=1m,effort=high]")
+    assert cursor_bridge.validate_model("claude-opus-4-8") == "claude-opus-4-8"
+
+
+def test_validate_model_family_prefix_stays_strict(monkeypatch):
+    """The prefix rule must still catch the cases the guard exists for.
+
+    Typos, retired names, and near-misses all fail. Note `gpt-5` fails against
+    `gpt-5.2`: the rule requires a `gpt-5-` id, and `gpt-5.` is not that.
+    """
+    listed = ["auto", "gpt-5.2", "claude-opus-4-8-high"]
+    monkeypatch.setattr(cursor_bridge, "list_models", lambda: listed)
+    for bad in ("gpt-5", "sonnet-4-thinking", "claude-opus-4-9", "gpt-6-nope", "nonsense"):
+        with pytest.raises(ValueError):
+            cursor_bridge.validate_model(bad)
+
+
+def test_validate_model_accepts_a_partial_family_prefix(monkeypatch):
+    """Known, deliberate looseness: any prefix ending at a '-' boundary passes.
+
+    `claude-opus` is a prefix of `claude-opus-4-8-high`, so it is accepted even
+    though cursor would not run it. That is the cost of accepting family bases
+    without hardcoding how deep a base must be — and it is the cheap side of the
+    trade: a truncated name costs one call and earns cursor's own error, whereas
+    over-strictness blocked a form cursor documents (see validate_model).
+    """
+    monkeypatch.setattr(cursor_bridge, "list_models", lambda: ["claude-opus-4-8-high"])
+    assert cursor_bridge.validate_model("claude-opus") == "claude-opus"
+
+
+# Model ids named as examples in the README and the cursor_ask/cursor_continue
+# docstrings. cursor reshuffles its list often (2026.07.23 dropped
+# `sonnet-4-thinking` and the bare `claude-opus-4-8` that the docs used to name),
+# and a stale example steers a caller into a guaranteed rejected call — the same
+# way agy 1.1.5's rename did. This is cursor's DOCUMENTED_AGY_MODELS.
+DOCUMENTED_CURSOR_MODELS = [
+    "auto",
+    "gpt-5.2",
+    "claude-opus-4-8-high",
+    "composer-2.5",
+    "cursor-grok-4.5-high",
+]
+
+
+def test_documented_cursor_models_still_accepted_by_live_cli(monkeypatch):
+    monkeypatch.setattr(cursor_bridge, "_MODELS_CACHE", None)  # force a fresh read
+    live = cursor_bridge.list_models()
+    if not live:
+        pytest.skip("cursor-agent not installed or `cursor-agent models` unreadable")
+    missing = [m for m in DOCUMENTED_CURSOR_MODELS if m not in live]
+    assert not missing, (
+        f"docs advertise cursor model(s) that no longer exist: {missing}. "
+        f"Live list has {len(live)} ids, e.g. {live[:8]}. Update the cursor_ask/"
+        "cursor_continue docstrings and the README, then this list."
+    )
+
+
 def test_validate_model_none_returns_none():
     assert cursor_bridge.validate_model(None) is None
 

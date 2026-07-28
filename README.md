@@ -347,8 +347,12 @@ The GitHub Copilot CLI (`copilot`, from `@github/copilot`) is stdout-native like
 `copilot -p "<prompt>" -s` runs a prompt non-interactively and prints just the final answer to
 stdout, so the bridge reads it there — no scraping. What makes it worth reaching for:
 
-- **Model selection.** `model` maps to copilot's `--model` (e.g. `gpt-5.3-codex`, `claude-sonnet-4.6`,
-  or `auto`). An unavailable model errors immediately with a clear message.
+- **Model selection.** `model` maps to copilot's `--model`; `auto` lets Copilot pick. Unlike the agy
+  and cursor tools, the bridge **can't validate this** — copilot exposes no non-interactive model
+  list — and the working set is **account-dependent**: on a Copilot Pro account here, `auto` worked
+  while `gpt-5.3-codex`, `claude-sonnet-4.6`, and even GitHub's own `--help` example `gpt-5.4` were all
+  rejected as "not available". So omit `model` (account default) or pass `auto` unless you know your
+  plan's ids; an unavailable one errors immediately with copilot's message, costing a call.
 - **Deterministic, race-free continue.** copilot's `--session-id <uuid>` both **sets** a new session's
   id and **resumes** an existing one, so the bridge generates the UUID itself and pins it to the
   workspace — no rollout-scraping. After a restart it falls back to the newest on-disk session
@@ -388,10 +392,14 @@ non-interactively and writes just the final answer to stdout, so the bridge read
 scraping (`--trust` trusts the workspace so it won't block on a prompt). What makes it worth reaching
 for:
 
-- **The widest model menu.** `model` maps to cursor's `--model` (e.g. `gpt-5.2`, `sonnet-4-thinking`,
-  `auto`, and parameterized ids like `claude-opus-4-8[context=1m]`) — GPT, Claude, Grok, and Composer
-  in one place. The bridge validates the label against `cursor-agent models` and rejects a typo up
-  front (like agy). Omit `model` to use your Cursor account default.
+- **The widest model menu.** `model` maps to cursor's `--model` (e.g. `auto`, `gpt-5.2`,
+  `claude-opus-4-8-high`, `composer-2.5`, `cursor-grok-4.5-high`) — GPT, Claude, Grok, and Composer in
+  one place, ~190 ids at the time of writing. cursor bakes the **effort and speed axes into the id**
+  (`…-low` / `-high` / `-xhigh` / `-max`, each with a `-fast` twin), and also accepts a bracket form on
+  the family base, e.g. `claude-opus-4-8[context=1m,effort=high]`. The bridge validates against
+  `cursor-agent models` and rejects a typo up front (like agy), accepting either an exact id or a
+  family base. Omit `model` to use your Cursor account default. **cursor reshuffles this list often** —
+  run `cursor-agent models` (or `cursor_status`) rather than trusting an example here.
 - **Deterministic, race-free continue.** `cursor-agent create-chat` mints a fresh chat and prints its
   id, and `-p --resume <chatId>` resumes that exact chat — so the bridge mints the id itself, pins it
   to the workspace, and resumes deterministically (no rollout-scraping, same idea as Copilot's

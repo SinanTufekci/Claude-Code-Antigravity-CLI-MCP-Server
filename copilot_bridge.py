@@ -9,6 +9,15 @@ against copilot 1.0.69 on Windows (bumped from 1.0.68: 1.0.69 adds a `--resume`
 convenience flag the bridge doesn't use, and `--session-id` still both sets a
 fresh id and resumes it — re-verified live via a set-then-resume round-trip).
 
+MODELS. copilot offers NO non-interactive way to list them — there is no `models`
+subcommand and an invalid `--model` error names no alternatives — so unlike the agy
+and cursor bridges this one cannot validate the caller's model up front, and passing
+a bad id costs a real call. The working set is also ACCOUNT-DEPENDENT: verified live
+on 1.0.69 with this Copilot account that `auto` ran fine while `gpt-5.3-codex`,
+`claude-sonnet-4.6`, and even GitHub's own `--help` example `gpt-5.4` all came back
+"not available". That is why the tool docs now name only `auto` and steer callers
+toward omitting the argument.
+
 CONTINUE / RESUME. copilot's `--session-id <uuid>` flag does double duty: on a
 fresh run it SETS the id of the new session; later it RESUMES that exact session.
 So — unlike codex, where we scrape the new rollout file to learn the id — the

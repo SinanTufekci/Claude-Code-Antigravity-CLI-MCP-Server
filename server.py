@@ -397,7 +397,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.22.0"
+__version__ = "0.22.1"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -3096,8 +3096,12 @@ async def copilot_ask(
                  tools; NOT an OS sandbox, so unlike codex it is not a hard
                  boundary), "workspace-write" (may edit files, confined to the
                  workspace), or "danger-full-access" (--allow-all — avoid).
-        model: Optional model override (`--model`, e.g. "gpt-5.3-codex"); omit to
-               use your account's default. An unavailable model errors immediately.
+        model: Optional model override (`--model`). Use "auto" to let Copilot pick.
+               Which ids work is ACCOUNT-DEPENDENT and copilot exposes no
+               non-interactive list, so the bridge cannot validate this the way the
+               agy/cursor tools do — an unavailable id errors immediately with
+               copilot's own message, costing a call. Prefer omitting it (your
+               account default) or "auto" unless you know your plan's ids.
         timeout_s: Max seconds to wait for copilot to complete. Default 180.
                    (Copilot's reasoning models can be slow; raise this if needed.)
         watch: If true, open a live "watch" view streaming copilot's steps from its
@@ -3313,9 +3317,13 @@ async def cursor_ask(
                  edits; NOT an OS sandbox, so unlike codex it is not a hard
                  boundary), "workspace-write" (may edit files, rooted at the
                  workspace), or "danger-full-access" (OS sandbox off — avoid).
-        model: Optional model override (`--model`, e.g. "gpt-5.2", "sonnet-4-thinking",
-               "auto"); validated against `cursor-agent models` and rejected on a
-               typo. Omit to use your Cursor default.
+        model: Optional model override (`--model`, e.g. "auto", "gpt-5.2",
+               "claude-opus-4-8-high", "composer-2.5"); validated against
+               `cursor-agent models` and rejected on a typo. cursor bakes the effort
+               and speed axes into the id (…-low/-high/-xhigh/-max, each with a
+               -fast twin) and also accepts a bracket form on the family base, e.g.
+               "claude-opus-4-8[context=1m,effort=high]". Omit to use your Cursor
+               default.
         timeout_s: Max seconds to wait for cursor to complete. Default 180.
         watch: If true, open a live "watch" view streaming cursor's steps from its
                `--output-format stream-json` event stream. Same final text is

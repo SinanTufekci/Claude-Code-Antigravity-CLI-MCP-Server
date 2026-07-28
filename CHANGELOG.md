@@ -10,6 +10,56 @@ summary.
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-07-28
+
+Swept the other three CLIs after the agy work. **codex and copilot needed no code
+change; cursor did** — and the documented *model names* had rotted for both cursor and copilot,
+which is the agy-1.1.5 failure mode all over again: the bridge keeps working while every example a
+caller might copy becomes a guaranteed rejected call.
+
+### Fixed
+
+- **cursor: `validate_model` rejected a form cursor itself documents.** `cursor-agent models`
+  enumerates **pre-composed** ids — `claude-opus-4-8-high`, `-xhigh`, `-thinking-max`, each with a
+  `-fast` twin — and never the bare `claude-opus-4-8`. But cursor's own `--help` advertises exactly
+  that bare id as the base for its bracket syntax (`claude-opus-4-8[context=1m,effort=high,fast=false]`),
+  so requiring an exact match blocked a valid call **with no workaround**, which is strictly worse than
+  letting a typo through (a typo costs one call and earns cursor's authoritative error). Validation now
+  accepts an exact id **or a family base** (a prefix ending at a `-` boundary). It stays tight enough to
+  matter: `gpt-5` still fails against `gpt-5.2` (no `gpt-5-` id exists), as do retired names. The known,
+  deliberate looseness — a partial prefix like `claude-opus` passes — is documented and tested.
+- **cursor: two documented model examples no longer exist.** 2026.07.23 reshuffled the list (193 ids):
+  `sonnet-4-thinking` and the bare `claude-opus-4-8` that the README and the `cursor_ask`/
+  `cursor_continue` docstrings named are **gone**. They now name live ids (`auto`, `gpt-5.2`,
+  `claude-opus-4-8-high`, `composer-2.5`, `cursor-grok-4.5-high`), explain that cursor bakes the effort
+  and speed axes into the id, and tell you to check `cursor-agent models` rather than trust an example.
+- **copilot: both documented model examples are dead.** Verified live on 1.0.69 — `gpt-5.3-codex` and
+  `claude-sonnet-4.6` both return `Model "…" is not available`, and so does GitHub's own `--help`
+  example `gpt-5.4`. Only `auto` worked. copilot exposes **no non-interactive model list** (no `models`
+  subcommand, and the error names no alternatives), so unlike the agy and cursor bridges this one
+  *cannot* validate up front — a bad id costs a real call. The docs now name only `auto`, say plainly
+  that the working set is account-dependent and unvalidatable, and steer callers toward omitting the
+  argument.
+
+### Added
+
+- **`DOCUMENTED_CURSOR_MODELS` guard test**, mirroring `DOCUMENTED_AGY_MODELS`: it checks every model
+  id the docs advertise against the **live** `cursor-agent models` output, so this rot fails a test
+  instead of a user's first call. (Skips when cursor isn't installed.)
+
+### Changed
+
+- `cursor_bridge` verified version → **2026.07.23** (from 2026.07.08; cursor self-updated twice during
+  this session, 07.09 → 07.23). Everything structural still holds — `create-chat` mints an id, `models`
+  lists, `status` reports auth, every flag the bridge passes is still in `--help`, and the
+  `chats/<id>/meta.json` `cwd` layout the continue-fallback reads is unchanged.
+  ⚠️ **A live cursor agent turn could not be re-verified** — the account hit its Cursor usage limit — so
+  the run path is confirmed by structure plus the bridge cleanly surfacing cursor's own limit error,
+  not by a completed round-trip.
+- **codex 0.144.1 and copilot 1.0.69 need nothing.** Both match the version their bridge was verified
+  against, both `*_status` checks pass, and both completed a live ask + continue round-trip with the
+  thread carried. Codex names no specific model ids in its docs, so it had nothing to rot.
+
 ## [0.22.0] - 2026-07-28
 
 ### Added
@@ -757,7 +807,8 @@ summary.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.1...HEAD
+[0.22.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.4...v0.22.0
 [0.21.4]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.3...v0.21.4
 [0.21.3]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.2...v0.21.3
