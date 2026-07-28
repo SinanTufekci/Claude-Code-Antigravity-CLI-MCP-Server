@@ -95,6 +95,24 @@ def _clean_watch_runs():
     server._WATCH_RUNS.clear()
 
 
+@pytest.fixture(autouse=True)
+def _clean_agy_json_state():
+    """Pin structured-output support OFF and clear the recorded-conversation map.
+
+    Both are process-global (the `--output-format` support probe and the
+    workspace->conversation map filled from agy's json result). Defaulting the probe
+    to False keeps these offline tests deterministic — otherwise every run of the
+    pre-1.1.8 text/transcript paths would silently switch behaviour depending on
+    which agy happens to be installed on the machine. Tests that exercise the 1.1.8
+    paths opt in explicitly (fake_agy_json, or monkeypatching the flag).
+    """
+    server._AGY_JSON_SUPPORT = False
+    server._CONV_BY_WORKSPACE.clear()
+    yield
+    server._AGY_JSON_SUPPORT = None
+    server._CONV_BY_WORKSPACE.clear()
+
+
 def test_find_newest_conv_after_missing_brain_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "BRAIN_DIR", tmp_path / "does-not-exist")
     assert server._find_newest_conv_after(time.time()) is None
@@ -805,7 +823,13 @@ def test_run_agy_reraises_after_poll_deadline(monkeypatch):
 
 @pytest.fixture
 def fake_agy(monkeypatch, brain_dir, last_conv_file):
-    """Mock subprocess.run, capture args, no-op the poll sleep."""
+    """Mock subprocess.run, capture args, no-op the poll sleep.
+
+    Pins the agy version to a pre-1.1.8 one so `--output-format json` is OFF and
+    these tests exercise the plain-text stdout path deterministically, regardless
+    of what agy is installed on the machine running the suite. The json path has
+    its own fixture (fake_agy_json).
+    """
     cap = {"args": None, "kwargs": None, "returncode": 0, "stdout": "", "stderr": ""}
 
     def fake_run(args, **kwargs):
@@ -818,7 +842,15 @@ def fake_agy(monkeypatch, brain_dir, last_conv_file):
     monkeypatch.setattr(server.subprocess, "run", fake_run)
     monkeypatch.setattr(server.time, "sleep", lambda *a, **k: None)
     monkeypatch.setattr(server, "_RESPONSE_POLL_DEADLINE_S", 0.0)
+    monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", False)
     return cap
+
+
+@pytest.fixture
+def fake_agy_json(fake_agy, monkeypatch):
+    """fake_agy with agy 1.1.8+ structured output ENABLED (--output-format json)."""
+    monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", True)
+    return fake_agy
 
 
 def test_run_antigravity_continue_with_pinned_id(fake_agy, brain_dir, last_conv_file):
@@ -908,6 +940,505 @@ def test_run_agy_exit0_without_answer_keeps_scrape_error_when_stderr_empty(
     last_conv_file.write_text(json.dumps({}), encoding="utf-8")
     with pytest.raises(RuntimeError, match="No conversation found"):
         server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+
+
+# --------------------------------------------------------------------------
+# agy 1.1.8 structured print-mode output (--output-format json)
+# --------------------------------------------------------------------------
+
+
+def _json_result(response="ans", conv="c-json", status="SUCCESS", **extra):
+    """The result object agy 1.1.8 prints for `-p --output-format json`."""
+    obj = {
+        "conversation_id": conv,
+        "status": status,
+        "response": response,
+        "duration_seconds": 2.17,
+        "num_turns": 1,
+        "usage": {"input_tokens": 10, "output_tokens": 2, "cache_read_tokens": 0},
+    }
+    obj.update(extra)
+    return json.dumps(obj)
+
+
+@pytest.mark.parametrize(
+    "version_out,expected",
+    [
+        ("1.1.8", True),
+        ("1.2.0", True),
+        ("2.0.0", True),
+        ("1.1.7", False),
+        ("1.1.6", False),
+        ("1.0.15", False),
+        ("", False),  # unparseable -> stay on the text path
+        ("not a version", False),
+    ],
+)
+def test_supports_json_output_version_gate(monkeypatch, version_out, expected):
+    monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", None)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: version_out)
+    assert server.supports_json_output() is expected
+
+
+def test_supports_json_output_is_cached(monkeypatch):
+    monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", None)
+    calls = {"n": 0}
+
+    def counted():
+        calls["n"] += 1
+        return "1.1.8"
+
+    monkeypatch.setattr(server, "_get_agy_version", counted)
+    assert server.supports_json_output() is True
+    assert server.supports_json_output() is True
+    assert calls["n"] == 1  # version probed once per process
+
+
+def test_supports_json_output_false_when_agy_missing(monkeypatch):
+    monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", None)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: None)
+    assert server.supports_json_output() is False
+
+
+def test_parse_json_result_reads_agy_object():
+    out = server._parse_json_result(_json_result(response="hello", conv="abc"))
+    assert out["response"] == "hello"
+    assert out["conversation_id"] == "abc"
+    assert out["usage"]["cache_read_tokens"] == 0
+
+
+def test_parse_json_result_tolerates_surrounding_whitespace():
+    assert server._parse_json_result("\n  " + _json_result() + "  \n")["response"] == "ans"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "",
+        "   ",
+        "plain text answer",  # an agy that ignored --output-format
+        "0.21.4",
+        '{"conversation_id": "c", "status": "SUCCESS"}',  # no `response` field
+        '{"broken": ',  # truncated / malformed
+        "[1, 2, 3]",  # valid JSON, wrong shape
+        '"just a string"',
+    ],
+)
+def test_parse_json_result_returns_none_for_non_results(stdout):
+    assert server._parse_json_result(stdout) is None
+
+
+@pytest.mark.parametrize("fmt", ["json", "stream-json"])
+def test_build_agy_args_adds_output_format_when_requested(monkeypatch, fmt):
+    monkeypatch.setattr(server, "AGY_BIN", "agy")
+    args, _ = server._build_agy_args(
+        "hi", "C:\\ws", continue_conv=False, timeout_s=10, output_format=fmt
+    )
+    assert args[args.index("--output-format") + 1] == fmt
+    # -p takes the prompt as its VALUE, so every other flag must precede it.
+    assert args.index("--output-format") < args.index("-p")
+    assert args[-2:] == ["-p", "hi"]
+
+
+def test_build_agy_args_omits_output_format_by_default(monkeypatch):
+    monkeypatch.setattr(server, "AGY_BIN", "agy")
+    args, _ = server._build_agy_args("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert "--output-format" not in args
+
+
+def test_run_agy_json_returns_response_field(fake_agy_json, last_conv_file):
+    # No conversation on record: a transcript scrape would raise, so returning the
+    # answer proves it came from the parsed `response` field.
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(response="  structured answer\n")
+    out = server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert out == "structured answer"
+    assert "--output-format" in fake_agy_json["args"]
+
+
+def test_run_agy_json_records_conversation_id(fake_agy_json, last_conv_file):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(conv="conv-from-agy")
+    server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert server._recorded_conv_id("C:\\ws") == "conv-from-agy"
+
+
+def test_run_agy_json_continue_pins_recorded_id_over_last_conversations(
+    fake_agy_json, last_conv_file
+):
+    """The whole point of capturing conversation_id: continue resumes OUR thread.
+
+    last_conversations.json is shared state agy rewrites for every session, so a
+    user's interactive run in the same folder could otherwise hijack the pin.
+    """
+    last_conv_file.write_text(json.dumps({"C:\\ws": "someone-elses-conv"}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(conv="our-conv")
+    server._run_agy("first", "C:\\ws", continue_conv=False, timeout_s=10)
+
+    server._run_agy("second", "C:\\ws", continue_conv=True, timeout_s=10)
+    args = fake_agy_json["args"]
+    assert args[args.index("--conversation") + 1] == "our-conv"
+    assert "someone-elses-conv" not in args
+
+
+def test_run_agy_json_continue_falls_back_to_last_conversations(fake_agy_json, last_conv_file):
+    # Nothing recorded yet (fresh process): the old resolution order still applies.
+    last_conv_file.write_text(json.dumps({"C:\\ws": "from-file"}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result()
+    server._run_agy("hi", "C:\\ws", continue_conv=True, timeout_s=10)
+    args = fake_agy_json["args"]
+    assert args[args.index("--conversation") + 1] == "from-file"
+
+
+def test_recorded_conv_id_is_case_insensitive_on_paths():
+    server._record_conv_id("C:\\Proj", "c9")
+    assert server._recorded_conv_id("c:\\proj") == "c9"
+
+
+def test_run_agy_json_failure_status_without_response_raises(fake_agy_json, last_conv_file):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(response="", status="ERROR", conv="c-bad")
+    with pytest.raises(RuntimeError, match="status=ERROR"):
+        server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+
+
+def test_run_agy_json_failure_status_with_response_still_returns_it(fake_agy_json, last_conv_file):
+    # agy's status vocabulary may grow; a real answer must not be thrown away.
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(response="partial answer", status="SOMETHING_NEW")
+    out = server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert out == "partial answer"
+
+
+def test_run_agy_json_empty_response_falls_back_to_transcript(
+    fake_agy_json, brain_dir, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({"C:\\ws": "c1"}), encoding="utf-8")
+    _write_transcript(brain_dir, "c1", [_entry("PLANNER_RESPONSE", "transcript answer")])
+    fake_agy_json["stdout"] = _json_result(response="", conv="c1")
+    out = server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert out == "transcript answer"
+
+
+def test_run_agy_json_degrades_to_text_when_agy_ignores_the_flag(fake_agy_json, last_conv_file):
+    """Verified on 1.1.8: an unrecognised --output-format VALUE prints plain text.
+
+    So structured output being requested must never mean structured output is
+    assumed — plain stdout still has to come back as the answer.
+    """
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = "plain text answer"
+    out = server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert out == "plain text answer"
+
+
+def test_run_agy_json_result_survives_json_schema_extra_fields(fake_agy_json, last_conv_file):
+    # --json-schema adds `structured_output`; unknown keys must not break parsing.
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(
+        response="ok", structured_output={"name": "x"}, json_schema={"type": "object"}
+    )
+    assert server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10) == "ok"
+
+
+def test_build_agy_args_output_format_is_opt_in(monkeypatch):
+    """Structured output is per-caller: the swarm builds its own argv and wants text."""
+    monkeypatch.setattr(server, "AGY_BIN", "agy")
+    for cont in (False, True):
+        args, _ = server._build_agy_args("hi", "C:\\ws", continue_conv=cont, timeout_s=10)
+        assert "--output-format" not in args
+    assert "--output-format" not in server._agy_base_args(10)
+
+
+# --------------------------------------------------------------------------
+# _StreamWatch — agy 1.1.8 stream-json events -> live watch steps
+# --------------------------------------------------------------------------
+
+
+def _ev(**payload):
+    """One NDJSON step_update line, in agy 1.1.8's shape."""
+    return json.dumps({"event": "step_update", "step_update": payload})
+
+
+def _feed(*lines, rid="r1"):
+    sw = server._StreamWatch(rid, time.time())
+    for line in lines:
+        sw.feed_line(line)
+    return sw
+
+
+def _kinds(rid="r1"):
+    return [(e["kind"], e["text"]) for e in server._watch_snapshot(rid)["events"]]
+
+
+@pytest.fixture
+def watch_slot():
+    """A watch run to append events to, so _StreamWatch output is observable."""
+    server._WATCH_RUNS["r1"] = server._watch_state("r1", "t", time.time(), 10, "agy", "p", [], 0.0)
+    return "r1"
+
+
+def test_stream_watch_captures_conversation_id_from_init(watch_slot):
+    sw = _feed(json.dumps({"event": "init", "conversation_id": "conv-9", "init": {"cwd": "x"}}))
+    assert sw.conv_id == "conv-9"
+    assert sw.saw_event is True
+
+
+def test_stream_watch_accumulates_text_deltas_into_one_narration(watch_slot):
+    """text_delta arrives in fragments; the viewer must not get them one per line."""
+    _feed(
+        _ev(
+            step_index=2, state="ACTIVE", step_type="agent_response", text_delta="I will count the "
+        ),
+        _ev(step_index=2, state="ACTIVE", step_type="agent_response", text_delta="py files."),
+        _ev(step_index=2, state="DONE", step_type="agent_response", text_delta="\n"),
+    )
+    assert _kinds() == [("narration", "I will count the py files.")]
+
+
+def test_stream_watch_emits_nothing_until_the_step_completes(watch_slot):
+    _feed(_ev(step_index=1, state="ACTIVE", step_type="agent_response", text_delta="partial"))
+    assert _kinds() == []
+
+
+def test_stream_watch_narration_is_first_line_and_capped(watch_slot):
+    _feed(
+        _ev(
+            step_index=1,
+            state="DONE",
+            step_type="agent_response",
+            text_delta="x" * 300 + "\nsecond line",
+        )
+    )
+    (kind, text) = _kinds()[0]
+    assert kind == "narration"
+    assert text == "x" * 200
+
+
+def test_stream_watch_reports_the_real_command(watch_slot):
+    """tool_info.parameters.CommandLine is a REAL nested object here — unlike the
+    transcript, which stores it JSON-encoded inside a string."""
+    _feed(
+        _ev(
+            step_index=3,
+            state="ACTIVE",
+            step_type="tool",
+            tool_name="run_command",
+            tool_info={"name": "run_command", "parameters": {"CommandLine": "git status"}},
+        ),
+        _ev(step_index=3, state="DONE", step_type="tool", tool_name="run_command", tool_info={}),
+    )
+    assert _kinds() == [("command", "git status"), ("result", "command finished")]
+
+
+def test_stream_watch_falls_back_to_tool_name_without_a_command(watch_slot):
+    _feed(_ev(step_index=4, state="ACTIVE", step_type="tool", tool_name="view_file"))
+    assert _kinds() == [("command", "view_file")]
+
+
+def test_stream_watch_captures_terminal_result(watch_slot):
+    sw = _feed(
+        json.dumps(
+            {
+                "event": "result",
+                "result": {"conversation_id": "c5", "status": "SUCCESS", "response": "done\n"},
+            }
+        )
+    )
+    assert sw.result["response"] == "done\n"
+    assert sw.conv_id == "c5"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "",
+        "   ",
+        "not json at all",
+        "{bad json",
+        "[1,2,3]",
+        '"a string"',
+        json.dumps({"event": "unknown_kind", "payload": 1}),
+        json.dumps({"event": "step_update", "step_update": "not a dict"}),
+        json.dumps({"event": "result", "result": None}),
+    ],
+)
+def test_stream_watch_ignores_malformed_lines(watch_slot, line):
+    """A format change must degrade to 'no live steps', never kill the run."""
+    sw = _feed(line)
+    assert _kinds() == []
+    assert sw.result is None
+
+
+def test_stream_watch_does_not_double_emit_a_repeated_done(watch_slot):
+    done = _ev(step_index=1, state="DONE", step_type="agent_response", text_delta="hello")
+    _feed(done, done)
+    assert _kinds() == [("narration", "hello")]
+
+
+# --------------------------------------------------------------------------
+# _run_agy_watched on stream-json (agy 1.1.8+): no transcript involved
+# --------------------------------------------------------------------------
+
+
+def _stream_lines(conv="c-stream", response="stream answer", status="SUCCESS"):
+    """A realistic agy 1.1.8 stream-json run: init, narration, a tool, the result."""
+    return (
+        json.dumps({"event": "init", "conversation_id": conv, "init": {"cwd": "C:\\ws"}})
+        + "\n"
+        + _ev(step_index=0, state="DONE", step_type="user_input")
+        + "\n"
+        + _ev(step_index=1, state="ACTIVE", step_type="agent_response", text_delta="Checking ")
+        + "\n"
+        + _ev(step_index=1, state="DONE", step_type="agent_response", text_delta="the repo.\n")
+        + "\n"
+        + _ev(
+            step_index=2,
+            state="ACTIVE",
+            step_type="tool",
+            tool_name="run_command",
+            tool_info={"name": "run_command", "parameters": {"CommandLine": "git status"}},
+        )
+        + "\n"
+        + _ev(step_index=2, state="DONE", step_type="tool", tool_name="run_command")
+        + "\n"
+        + json.dumps(
+            {
+                "event": "result",
+                "result": {"conversation_id": conv, "status": status, "response": response},
+            }
+        )
+        + "\n"
+    )
+
+
+@pytest.fixture
+def fake_watched_agy(monkeypatch):
+    """Run _run_agy_watched against a scripted stdout, with no browser or server."""
+    cfg = {"stdout": "", "stderr": "", "returncode": 0, "args": None}
+
+    class _Popen:
+        def __init__(self, args, **kwargs):
+            cfg["args"] = args
+            self.returncode = cfg["returncode"]
+            self.stdout = io.StringIO(cfg["stdout"])
+            self.stderr = io.StringIO(cfg["stderr"])
+            self._n = 2
+
+        def poll(self):
+            self._n -= 1
+            return None if self._n > 0 else self.returncode
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: _Popen(*a, **k))
+    monkeypatch.setattr(server, "_ensure_watch_server", lambda: 12345)
+    monkeypatch.setattr(server, "_open_watch_window", lambda *a, **k: None)
+    monkeypatch.setattr(server.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_RESPONSE_POLL_DEADLINE_S", 0.0)
+    monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", True)
+    return cfg
+
+
+def test_watched_stream_returns_result_response_without_any_transcript(
+    fake_watched_agy, brain_dir, last_conv_file
+):
+    """The point of the migration: no JSONL, no SQLite, no conversation guessing."""
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")  # nothing to scrape
+    fake_watched_agy["stdout"] = _stream_lines(response="stream answer")
+    out = server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert out == "stream answer"
+    assert "--output-format" in fake_watched_agy["args"]
+    assert fake_watched_agy["args"][fake_watched_agy["args"].index("--output-format") + 1] == (
+        "stream-json"
+    )
+
+
+def test_watched_stream_populates_live_steps_in_the_viewer(
+    fake_watched_agy, brain_dir, last_conv_file
+):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["stdout"] = _stream_lines()
+    server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    events = [(e["kind"], e["text"]) for e in server._watch_snapshot()["events"]]
+    assert ("narration", "Checking the repo.") in events
+    assert ("command", "git status") in events
+    assert ("result", "command finished") in events
+
+
+def test_watched_stream_records_conversation_id_for_later_continue(
+    fake_watched_agy, brain_dir, last_conv_file
+):
+    """Closes the asymmetry: a watched run now pins later continues like ask does."""
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["stdout"] = _stream_lines(conv="watched-conv")
+    server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert server._recorded_conv_id("C:\\ws") == "watched-conv"
+
+
+def test_watched_stream_failure_status_raises(fake_watched_agy, brain_dir, last_conv_file):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["stdout"] = _stream_lines(response="", status="ERROR")
+    with pytest.raises(RuntimeError, match="status=ERROR"):
+        server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert server._watch_snapshot()["status"] == "error"
+
+
+def test_watched_stream_without_result_event_falls_back_to_transcript(
+    fake_watched_agy, brain_dir, last_conv_file
+):
+    """agy died mid-stream or ignored the flag: the old scrape still has to work."""
+    last_conv_file.write_text(json.dumps({"C:\\ws": "wc"}), encoding="utf-8")
+    _write_transcript(brain_dir, "wc", [_entry("PLANNER_RESPONSE", "from transcript")])
+    fake_watched_agy["stdout"] = ""  # no events at all
+    out = server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert out == "from transcript"
+
+
+def test_watched_stream_answer_matches_the_non_watched_path(
+    fake_watched_agy, fake_agy_json, brain_dir, last_conv_file, monkeypatch
+):
+    """watch=True and watch=False must not disagree about what the answer IS.
+
+    Both now read agy's `result`/`response`, so a multi-step run returns the same
+    full turn text either way.
+    """
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_watched_agy["stdout"] = _stream_lines(response="the same answer")
+    watched = server._run_agy_watched("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+
+    monkeypatch.setattr(server.subprocess, "Popen", None)  # not used by the plain path
+    fake_agy_json["stdout"] = _json_result(response="the same answer")
+    plain = server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert watched == plain == "the same answer"
+
+
+# --------------------------------------------------------------------------
+# _pump_pipe — drains AND parses, so the child can't block on a full pipe
+# --------------------------------------------------------------------------
+
+
+def test_pump_pipe_hands_every_line_to_the_handler():
+    seen = []
+    t, chunks = server._pump_pipe(io.StringIO("a\nb\nc\n"), seen.append)
+    t.join(timeout=5)
+    assert [s.strip() for s in seen] == ["a", "b", "c"]
+    assert "".join(chunks) == "a\nb\nc\n"
+
+
+def test_pump_pipe_keeps_draining_when_the_handler_raises():
+    """A parse bug must not stop the drain — that would re-create the pipe-buffer hang."""
+    seen = []
+
+    def flaky(line):
+        seen.append(line)
+        raise ValueError("boom")
+
+    t, chunks = server._pump_pipe(io.StringIO("a\nb\n"), flaky)
+    t.join(timeout=5)
+    assert len(seen) == 2
+    assert "".join(chunks) == "a\nb\n"
 
 
 def test_run_agy_args_include_print_timeout_and_prompt(fake_agy, brain_dir, last_conv_file):

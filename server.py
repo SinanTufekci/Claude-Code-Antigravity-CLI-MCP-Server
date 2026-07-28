@@ -10,7 +10,9 @@ now writes the clean final answer straight to stdout in a non-TTY subprocess
 (verified empirically — stdout carries only the answer, no tool-calling
 narration). So _run_agy now PREFERS stdout when present and falls back to
 transcript-scraping only when stdout is empty (older agy, non-Windows per the
-1.0.15 changelog, or a --sandbox run). The bridge still detaches agy from the
+1.0.15 changelog, or a --sandbox run). As of agy 1.1.8 that stdout is a structured
+JSON result object rather than bare text — see the structured-output note below.
+The bridge still detaches agy from the
 host's controlling terminal when spawning it (see _spawn_kwargs), which prevents
 the pre-1.0.15 terminal leak into the host TUI and is harmless on 1.0.15+.
 State-file layout and transcript schema re-verified on agy 1.0.15.
@@ -41,10 +43,11 @@ unchecked. `agy models` itself must be
 run with stdin closed (it blocks on an interactive terminal otherwise), same as
 -p is spawned with DEVNULL stdin.
 
-Model SLUGS (agy 1.1.5, list re-checked live on 1.1.6) — the label format CHANGED
+Model SLUGS (agy 1.1.5, list re-checked live on 1.1.8) — the label format CHANGED
 and every old example is now invalid. 1.1.5 introduced "stable, user-facing model
 slugs" that the /model picker shows and --model accepts, and `agy models` now emits
-ONLY those slugs. As of 1.1.6 the live list is: gemini-3.6-flash-{low,medium,high},
+ONLY those slugs. The live list (re-read on 1.1.8, unchanged since 1.1.6) is:
+gemini-3.6-flash-{low,medium,high},
 gemini-3.5-flash-{low,medium,high}, gemini-3.1-pro-{low,high}, claude-sonnet-4-6,
 claude-opus-4-6-thinking, gpt-oss-120b-medium — 1.1.6 ADDED the gemini-3.6-flash
 family and moved the settings.json default to Gemini 3.6 Flash (High) (verified
@@ -180,6 +183,95 @@ security-tightening note, not a break: 1.1.3 stopped auto-approving out-of-works
 writes in always-proceed mode; the module's SECURITY posture stays deliberately
 conservative regardless (assume arbitrary code), so no claim is loosened on it.
 
+Structured print-mode output (agy 1.1.8) — the first agy change that lets this
+bridge DELETE guesswork rather than work around a break, and the reason the
+transcript/SQLite scraping described above is now a FALLBACK rather than the primary
+read path. 1.1.8 gave `-p` an `--output-format` flag (text | json | stream-json)
+plus `--json-schema`. Nothing
+broke — re-verified live on 1.1.8 that the pre-existing text path still round-trips
+(ask, conversation-pinned continue, and `--model` all returned clean) — but the
+`json` format is strictly better than parsing bare text, so _run_agy now asks for
+it whenever supports_json_output() says the installed agy is 1.1.8+. Verified live,
+the result is one object: {conversation_id, status, response, duration_seconds,
+num_turns, usage{...,cache_read_tokens}}, and it composes with every flag this
+bridge passes (`--conversation` continue returned num_turns=2 with memory intact,
+`--model` round-tripped, `--dangerously-skip-permissions` unaffected).
+
+Two things that buys us. (1) `response` is a contractual field, replacing the
+"we verified stdout carries only the answer" assumption the text path rests on.
+(2) `conversation_id` is agy telling us EXACTLY which conversation the run used —
+previously the bridge could only infer that from last_conversations.json (shared
+state agy rewrites for every session, including the user's own interactive TUI work
+in the same folder) or from brain-dir mtimes. _run_agy now records that id per
+workspace and _build_agy_args prefers it when pinning a continue, falling back to
+last_conversations.json and then `-c`. Consequence worth knowing: on 1.1.8+ an
+antigravity_continue resumes THIS BRIDGE's last thread in that workspace, where
+before it could land on a conversation the user had started interactively in the
+same folder since. That is what the pinning was always trying to do; it can only
+now be done exactly. The map is process-local, so a restarted server simply falls
+back to the old resolution order.
+
+WATCH mode now rides the same 1.1.8 API, via `stream-json` (see _StreamWatch).
+Instead of polling the undocumented JSONL transcript on a timer and inferring which
+brain dir belongs to this run, the watched runners consume agy's typed NDJSON event
+stream — `init` / `step_update` / `result` — straight off stdout. The premise was
+verified before writing any of it: the events arrive INCREMENTALLY (a 17 s run
+spread 18 events over 12.4 s), and a live watched run through the bridge grew its
+step count 0 → 3 → 6 → 7 while agy worked. What the stream gives that the scrape
+could not: the real `tool_info.parameters.CommandLine` as a nested object (the
+transcript stores tool args JSON-encoded inside a string, which is why
+_clean_tool_arg exists), `text_delta` fragments per agent_response step, explicit
+ACTIVE→DONE transitions, and `conversation_id` — so a WATCHED run now records its
+conversation for later pinning exactly like the plain path, closing an asymmetry
+that used to leave watch depending on last_conversations.json. The answer comes
+from the terminal `result` event, which is the SAME field the plain path reads, so
+watch=True and watch=False can no longer disagree about what the answer is.
+
+Two things still read the transcript on purpose. Continue-mode history seeding
+(_read_agy_history) shows PRIOR turns in the viewer, and stream-json describes only
+the current run — it is cosmetic and already degrades to [] when unreadable. And
+every stream path keeps _resolve_and_read as a fallback for a run that produces no
+`result` event (agy died mid-stream, or ignored the flag). Pre-1.1.8 agy keeps the
+whole original _WatchFeed path, re-verified live by forcing supports_json_output()
+off against a real agy: no --output-format in argv, transcript scrape, right answer.
+
+`--json-schema` remains unadopted: it works (verified — it adds a validated
+`structured_output` object alongside the prose `response`) but no bridge tool
+currently needs a caller-supplied schema.
+
+ANSWER SHAPE — a deliberate, user-visible change. agy's `response` is the whole
+turn: every agent_response step concatenated. The old transcript scrape returned
+only the LAST completed PLANNER_RESPONSE. On a single-step ask they are identical
+(verified: '0.21.4' both ways), but on a chatty multi-step run they differ — measured
+on one run, 297 chars ("I will first count the .py files.\nNext, I will print today's
+date.\n…\nCompleted counting .py files (19 found)…") versus 128 for the last step
+alone, with the json answer ENDING IN the transcript answer. The full turn is what
+the bridge now returns, on every path. Rationale: `result.response` is agy's own
+contract for "what this turn produced", and this release's whole direction is to
+trust that contract instead of the bridge's reconstruction of it — the last-step
+rule was never a product decision, just the best a transcript scrape could do, and
+it silently DROPS content whenever the model does its real work and then closes with
+a short "Done." The cost is narration noise on multi-step runs; the watch window
+exists to show that narration, but dropping content is not recoverable.
+
+Why the version gate rather than "just pass the flag": on 1.1.8 an unrecognised
+--output-format VALUE is silently ignored and agy prints plain text (verified —
+`--output-format bogus` exited 0 with a normal answer), but a pre-1.1.8 agy has no
+such FLAG at all and could fail arg parsing on every call. supports_json_output()
+therefore checks the version and answers False when it can't be parsed, and
+_parse_json_result returns None on anything that isn't the expected object so a
+silently-ignored flag degrades to the text path instead of crashing.
+
+Rest of 1.1.7 reviewed, nothing else touches this bridge: the `-p` fix for sending
+a prompt before the account-eligibility check finished is a benign win on our exact
+path; the disabled-plugins-still-running-hooks fix, the MCP OAuth relaxation
+(Salesforce/Atlassian — agy as an MCP *client*, the opposite direction from this
+bridge), the `/btw` first-action crash, and the Windows CJK clipboard-copy fix are
+all interactive-TUI or client-side. Same for the rest of 1.1.8: `copyOnSelect` is a
+TUI setting, and the compound-command allow-always improvement is an interactive
+permission-prompt change (print mode still bypasses that via
+--dangerously-skip-permissions).
+
 SECURITY — read this: `agy -p` runs the model as an autonomous agent that
 executes its tools (read/write files, run shell commands, reach the network)
 with no approval gate. Through 1.1.2 that was unconditional and had NO opt-out:
@@ -305,7 +397,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.21.4"
+__version__ = "0.22.0"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -337,7 +429,12 @@ _AGY_LOCK = threading.Lock()
 # Latest agy version the bridge's state-file assumptions were verified against.
 # Newer agy releases may change paths/schemas (the SQLite migration is the known
 # risk), so we warn at startup if the installed agy is newer than this.
-VERIFIED_AGY_VERSION = (1, 1, 6)
+VERIFIED_AGY_VERSION = (1, 1, 8)
+
+# First agy version whose print mode understands `--output-format json` (1.1.8).
+# Below this the flag is unknown to agy's parser, so the bridge must not pass it
+# and stays on the plain-text stdout path. See supports_json_output.
+JSON_OUTPUT_MIN_VERSION = (1, 1, 8)
 
 # Poll window for the transcript/conversation-id to appear after agy exits.
 # agy has already returned 0 by the time we read, so the common case resolves
@@ -483,6 +580,42 @@ def _drain_pipe(stream) -> "tuple[threading.Thread, list]":
         try:
             for line in stream:
                 chunks.append(line)
+        except (ValueError, OSError):
+            pass  # pipe closed (e.g. by proc.kill()) — stop quietly
+        finally:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    return t, chunks
+
+
+def _pump_pipe(stream, on_line) -> "tuple[threading.Thread, list]":
+    """_drain_pipe, but hand each line to `on_line` as it arrives.
+
+    This is how the watched runners consume agy's stream-json stdout: the events
+    must be processed WHILE agy works, but the run loop still has to stay free to
+    enforce its hard deadline (a blocking read on stdout could never time out). So
+    the parsing happens here on the reader thread and the loop keeps polling.
+    Draining is still the other half of the job — an unread pipe fills its OS buffer
+    and hangs the child (see _drain_pipe).
+
+    `on_line` must not raise; exceptions are swallowed so a parse bug can never kill
+    the reader thread and re-introduce the pipe-buffer hang it exists to prevent.
+    """
+    chunks: list = []
+
+    def _reader():
+        try:
+            for line in stream:
+                chunks.append(line)
+                try:
+                    on_line(line)
+                except Exception:  # noqa: BLE001 - a bad line must not stop the drain
+                    log.debug("stream handler failed on a line", exc_info=True)
         except (ValueError, OSError):
             pass  # pipe closed (e.g. by proc.kill()) — stop quietly
         finally:
@@ -1033,6 +1166,78 @@ def _collect_status() -> list[tuple[str, bool, str]]:
     return rows
 
 
+# Whether the installed agy understands `--output-format json`. Resolved once per
+# process (a `agy --version` subprocess) and cached — _run_agy consults it on every
+# call, and agy cannot change version underneath a running process.
+_AGY_JSON_SUPPORT: Optional[bool] = None
+_AGY_JSON_SUPPORT_LOCK = threading.Lock()
+
+
+def supports_json_output() -> bool:
+    """True if this agy has print-mode structured output (`--output-format json`).
+
+    agy 1.1.8 added it. Below that the flag is not in agy's parser, so passing it
+    risks an arg-parse failure on every call — hence the version gate rather than
+    "just try it". An UNPARSEABLE/missing version answers False: the plain-text
+    stdout path works on every agy the bridge has ever supported, so it is the safe
+    default. Cached for the process.
+    """
+    global _AGY_JSON_SUPPORT
+    with _AGY_JSON_SUPPORT_LOCK:
+        if _AGY_JSON_SUPPORT is None:
+            version = _parse_agy_version(_get_agy_version() or "")
+            _AGY_JSON_SUPPORT = version is not None and version >= JSON_OUTPUT_MIN_VERSION
+        return _AGY_JSON_SUPPORT
+
+
+def _parse_json_result(stdout: str) -> Optional[dict]:
+    """agy's `--output-format json` result object, or None if stdout isn't one.
+
+    The 1.1.8 shape is a single JSON object: {conversation_id, status, response,
+    duration_seconds, num_turns, usage} (plus structured_output when --json-schema
+    is used). None means "this isn't structured output" — stdout was plain text,
+    empty, or malformed — and the caller falls back to treating stdout as the
+    answer. That fallback is what keeps the bridge correct if agy ever silently
+    ignores the flag: verified on 1.1.8 that an unrecognised --output-format VALUE
+    is dropped without error and prints plain text, so a bad/removed format must
+    never surface as a crash.
+    """
+    text = (stdout or "").strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict) or "response" not in obj:
+        return None
+    return obj
+
+
+# workspace -> conversation id, recorded from agy's own `--output-format json`
+# result. Preferred over last_conversations.json for continue-pinning: it is the
+# id of the run THIS bridge just made, whereas last_conversations.json is shared
+# state agy rewrites for every session — including the user's own interactive TUI
+# work in the same folder. Process-local by design; on a fresh server it is empty
+# and pinning falls back to last_conversations.json exactly as before.
+_CONV_BY_WORKSPACE: dict[str, str] = {}
+_CONV_BY_WORKSPACE_LOCK = threading.Lock()
+
+
+def _record_conv_id(workspace: str, conv_id: str) -> None:
+    """Remember the conversation agy just used for `workspace`."""
+    if not conv_id:
+        return
+    with _CONV_BY_WORKSPACE_LOCK:
+        _CONV_BY_WORKSPACE[os.path.normcase(workspace)] = conv_id
+
+
+def _recorded_conv_id(workspace: str) -> Optional[str]:
+    """The conversation this process last ran in `workspace`, if any."""
+    with _CONV_BY_WORKSPACE_LOCK:
+        return _CONV_BY_WORKSPACE.get(os.path.normcase(workspace))
+
+
 def _resolve_and_read(pinned_conv: Optional[str], workspace: str, start: float) -> str:
     """Resolve the conversation id for this run and return its final response.
 
@@ -1134,11 +1339,19 @@ def _build_agy_args(
     continue_conv: bool,
     timeout_s: int,
     model: Optional[str] = None,
+    output_format: Optional[str] = None,
 ) -> tuple[list[str], Optional[str]]:
     """Build agy's argv and resolve the pinned conversation id for continue mode.
 
     `model` (when given) becomes agy's `--model <label>` — verified working in
     print mode on 1.0.16; validate it via validate_model before calling this.
+
+    `output_format` adds agy 1.1.8's `--output-format` — "json" for a single result
+    object (the plain ask/continue path, see _parse_json_result) or "stream-json"
+    for the live NDJSON event stream (the watched runners, see _StreamWatch). It is
+    OPT-IN per caller, not folded into _agy_base_args, because the swarm workers
+    build their own argv there and have no use for it. Gate it on
+    supports_json_output() — the flag does not exist before 1.1.8.
 
     The base args carry --dangerously-skip-permissions (see _agy_base_args: it is
     load-bearing on agy 1.1.3+, not the no-op it was through 1.1.2). We still do
@@ -1148,14 +1361,18 @@ def _build_agy_args(
     flag makes print mode safe; see the module docstring's SECURITY note.
     """
     args = _agy_base_args(timeout_s)
+    if output_format:
+        args.extend(["--output-format", output_format])
     if model:
         args.extend(["--model", model])
     pinned_conv: Optional[str] = None
     if continue_conv:
         # Pin to the exact conversation rooted at this workspace instead of `-c`
         # ("most recent"), which could resume a conversation started elsewhere in
-        # between. Fall back to -c only when we have no id on record yet.
-        pinned_conv = _read_last_conv_id(workspace)
+        # between. Prefer the id agy itself reported for our last run here (exact,
+        # and immune to anything else rewriting agy's shared state), then the
+        # workspace's entry in last_conversations.json, then -c.
+        pinned_conv = _recorded_conv_id(workspace) or _read_last_conv_id(workspace)
         if pinned_conv:
             args.extend(["--conversation", pinned_conv])
         else:
@@ -1172,7 +1389,15 @@ def _run_agy(
     model: Optional[str] = None,
 ) -> str:
     os.makedirs(workspace, exist_ok=True)  # agy's cwd must exist (mirrors the swarm)
-    args, pinned_conv = _build_agy_args(prompt, workspace, continue_conv, timeout_s, model)
+    use_json = supports_json_output()
+    args, pinned_conv = _build_agy_args(
+        prompt,
+        workspace,
+        continue_conv,
+        timeout_s,
+        model,
+        output_format="json" if use_json else None,
+    )
 
     with _AGY_LOCK:
         start = time.time()
@@ -1211,7 +1436,43 @@ def _run_agy(
         # transcript/.db scrape below, unchanged. A --sandbox run likewise writes
         # nothing to stdout, so it too uses the fallback.
         stdout_answer = (proc.stdout or "").strip()
-        if stdout_answer:
+
+        # agy 1.1.8+: stdout is a structured result object rather than bare text
+        # (we asked for it via --output-format json). Parsing it beats trusting the
+        # text layout — `response` is a contractual field, and `conversation_id`
+        # tells us EXACTLY which conversation this run used instead of inferring it
+        # from shared state. Record that id so a later continue pins to this thread.
+        # A None result means agy gave us plain text after all (an agy that ignored
+        # the flag), which falls through to the text path below unchanged.
+        result = _parse_json_result(stdout_answer) if use_json else None
+        if result is not None:
+            conv_id = result.get("conversation_id") or ""
+            if conv_id:
+                _record_conv_id(workspace, conv_id)
+                pinned_conv = pinned_conv or conv_id
+            status = result.get("status")
+            answer = (result.get("response") or "").strip()
+            log.debug(
+                "agy json result: status=%s conv=%s answer_chars=%d",
+                status,
+                conv_id,
+                len(answer),
+            )
+            if answer:
+                # An unexpected status with a real answer is not worth discarding
+                # the answer over — agy's status vocabulary may grow — so note it
+                # and hand the answer back.
+                if status and status != "SUCCESS":
+                    log.warning("agy reported status=%s but returned an answer", status)
+                return answer
+            if status and status != "SUCCESS":
+                raise RuntimeError(
+                    f"agy reported status={status} with no response "
+                    f"(conversation {conv_id or 'unknown'})."
+                    + (f"\nstderr: {proc.stderr[-1000:]}" if proc.stderr else "")
+                )
+            # SUCCESS but an empty response: fall through to the transcript scrape.
+        elif stdout_answer:
             log.debug("using agy stdout answer (%d chars)", len(stdout_answer))
             return stdout_answer
 
@@ -1435,11 +1696,115 @@ def _watch_image_allowed(path: str) -> bool:
         return bool(path) and any(s["image"] == path for s in _WATCH_RUNS.values())
 
 
+class _StreamWatch:
+    """Turns agy's `--output-format stream-json` stdout into live watch events.
+
+    The 1.1.8 replacement for _WatchFeed's transcript polling: instead of re-reading
+    an undocumented JSONL file on a timer and inferring which conversation is ours,
+    we consume the typed NDJSON events agy emits as it works. Verified live that they
+    arrive INCREMENTALLY (a 17 s run spread its 18 events over 12.4 s), which is the
+    whole premise — a buffered stream would make the viewer useless.
+
+    Event shapes (agy 1.1.8, verified live):
+      {"event":"init","conversation_id":…,"init":{cwd,tools,permission_mode}}
+      {"event":"step_update","step_update":{conversation_id,step_index,state,
+          step_type,tool_name?,text_delta?,tool_info?{name,parameters,output},…}}
+      {"event":"result","result":{conversation_id,status,response,usage,…}}
+
+    `state` is ACTIVE then DONE for a given step_index. agent_response text arrives
+    as INCREMENTAL `text_delta` fragments that must be concatenated per step (the
+    DONE update's delta is usually just the trailing newline), so narration is
+    emitted once a step completes rather than per fragment. Tool steps carry
+    `tool_info.parameters.CommandLine` as a REAL nested object — unlike the
+    transcript, which stores tool args JSON-encoded inside a string and needs
+    _clean_tool_arg to unwrap.
+
+    Thread-safe by construction: feed_line runs on the stdout reader thread and only
+    touches this instance plus _watch_append (which takes _WATCH_LOCK).
+    """
+
+    def __init__(self, rid: str, start: float) -> None:
+        self._rid = rid
+        self._start = start
+        self._text: dict[int, list[str]] = {}  # step_index -> accumulated deltas
+        self._emitted: set[int] = set()  # step indices already turned into events
+        self.conv_id: Optional[str] = None
+        self.result: Optional[dict] = None
+        self.saw_event = False  # any well-formed event at all (i.e. agy honoured the flag)
+
+    def _emit(self, kind: str, text: str) -> None:
+        if not text:
+            return
+        _watch_append(
+            self._rid, [{"kind": kind, "text": text, "t": round(time.time() - self._start, 1)}]
+        )
+
+    def feed_line(self, line: str) -> None:
+        """Parse one NDJSON line and append any watch events it implies.
+
+        Never raises: a malformed or unrecognised line is ignored, so an agy that
+        changes or drops the format degrades to "no live steps" rather than killing
+        the run (the answer still resolves from the result event or the transcript).
+        """
+        line = (line or "").strip()
+        if not line.startswith("{"):
+            return
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
+            return
+        kind = event.get("event")
+        self.saw_event = True
+        if event.get("conversation_id") and not self.conv_id:
+            self.conv_id = event["conversation_id"]
+
+        if kind == "result":
+            result = event.get("result")
+            if isinstance(result, dict):
+                self.result = result
+                if result.get("conversation_id"):
+                    self.conv_id = result["conversation_id"]
+            return
+        if kind != "step_update":
+            return
+
+        step = event.get("step_update")
+        if not isinstance(step, dict):
+            return
+        if step.get("conversation_id") and not self.conv_id:
+            self.conv_id = step["conversation_id"]
+        idx = step.get("step_index")
+        stype, state = step.get("step_type"), step.get("state")
+
+        if stype == "agent_response":
+            if isinstance(idx, int) and step.get("text_delta"):
+                self._text.setdefault(idx, []).append(step["text_delta"])
+            if state == "DONE" and isinstance(idx, int) and idx not in self._emitted:
+                self._emitted.add(idx)
+                full = "".join(self._text.get(idx, [])).strip()
+                if full:
+                    self._emit("narration", full.splitlines()[0][:200])
+        elif stype == "tool":
+            info = step.get("tool_info") or {}
+            params = info.get("parameters") or {}
+            if state == "ACTIVE":
+                cmd = params.get("CommandLine") or info.get("name") or step.get("tool_name") or ""
+                self._emit("command", str(cmd)[:200])
+            elif state == "DONE":
+                self._emit("result", "command finished")
+
+
 class _WatchFeed:
     """Locks onto this run's conversation and turns new transcript entries into
     rich step events (narration / command / result) appended to the shared watch
     state. For a new conversation it locks onto the first brain dir that appears
-    after launch and didn't pre-exist, and never switches away from it."""
+    after launch and didn't pre-exist, and never switches away from it.
+
+    The pre-1.1.8 fallback. agy 1.1.8+ runs use _StreamWatch instead, which reads
+    agy's own typed event stream rather than scraping this undocumented transcript;
+    this path stays for older agy (and is why _clean_tool_arg still exists)."""
 
     def __init__(self, pinned_conv: Optional[str], start: float, rid: str = _MAIN) -> None:
         self._start = start
@@ -1950,12 +2315,26 @@ def _run_agy_watched(
 
     agy runs headless (console-detached, no leak); alongside it, the bridge serves
     a small localhost page and opens your browser to it, live-streaming agy's steps
-    (narration + the real commands it runs) read from the transcript. The return
-    value is identical to antigravity_ask. The viewer is best-effort and cross-platform
-    (any browser); if it can't open, the run still completes normally.
+    (narration + the real commands it runs). The return value is identical to
+    antigravity_ask. The viewer is best-effort and cross-platform (any browser); if
+    it can't open, the run still completes normally.
+
+    On agy 1.1.8+ the steps come from agy's OWN typed event stream
+    (--output-format stream-json, parsed by _StreamWatch), so the viewer no longer
+    depends on scraping the undocumented JSONL transcript — and the answer comes
+    from the stream's terminal `result` event, matching antigravity_ask exactly.
+    Older agy keeps the transcript-polling path (_WatchFeed) unchanged.
     """
     os.makedirs(workspace, exist_ok=True)  # agy's cwd must exist (mirrors the swarm)
-    args, pinned_conv = _build_agy_args(prompt, workspace, continue_conv, timeout_s, model)
+    use_stream = supports_json_output()
+    args, pinned_conv = _build_agy_args(
+        prompt,
+        workspace,
+        continue_conv,
+        timeout_s,
+        model,
+        output_format="stream-json" if use_stream else None,
+    )
 
     with _AGY_LOCK:
         start = time.time()
@@ -1963,10 +2342,13 @@ def _run_agy_watched(
         if len(title) > 200:
             title = title[:200].rsplit(" ", 1)[0] + "…"
         # In continue mode, seed the viewer with the prior turns so it reads as one
-        # ongoing conversation instead of a blank new window.
+        # ongoing conversation instead of a blank new window. This still reads the
+        # transcript: stream-json describes only the CURRENT run, and prior turns are
+        # history. It is cosmetic and already degrades to [] when unreadable.
         history = _read_agy_history(pinned_conv) if (continue_conv and pinned_conv) else []
         rid = _watch_begin(title, start, timeout_s, prompt=prompt, history=history)
-        feed = _WatchFeed(pinned_conv, start, rid)
+        stream = _StreamWatch(rid, start) if use_stream else None
+        feed = None if use_stream else _WatchFeed(pinned_conv, start, rid)
         try:
             port = _ensure_watch_server()
             _open_watch_window(f"http://127.0.0.1:{port}/?id={rid}", rid)
@@ -1980,13 +2362,16 @@ def _run_agy_watched(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,  # line-buffered: stream-json events are consumed as they land
             **_spawn_kwargs(),  # agy stays headless; the browser is the viewer
         )
-        # Drain stdout/stderr on background threads: the poll loop below never reads
-        # them, so without this a large stdout answer fills the OS pipe buffer, hangs
-        # agy, and causes a false timeout with a truncated answer (see _drain_pipe).
-        # The answer itself still comes from the transcript, as before.
-        out_t, _out = _drain_pipe(proc.stdout)
+        # Both pipes must be drained regardless of mode, or a big stdout fills the OS
+        # pipe buffer and hangs agy into a false timeout (see _drain_pipe). With
+        # stream-json the stdout drain doubles as the live event parser (_pump_pipe).
+        if stream is not None:
+            out_t, _out = _pump_pipe(proc.stdout, stream.feed_line)
+        else:
+            out_t, _out = _drain_pipe(proc.stdout)
         err_t, err_chunks = _drain_pipe(proc.stderr)
         hard_deadline = start + timeout_s + 30
         while proc.poll() is None:
@@ -1994,20 +2379,49 @@ def _run_agy_watched(
                 proc.kill()
                 _watch_finish(rid, "error", "(timed out)", time.time() - start)
                 raise RuntimeError(f"agy timed out after {timeout_s + 30}s (watched)")
-            feed.pump()
+            if feed is not None:
+                feed.pump()
             time.sleep(_PROGRESS_POLL_INTERVAL_S)
-        feed.pump()  # drain transcript entries flushed right before exit
-        out_t.join(timeout=5)
+        if feed is not None:
+            feed.pump()  # drain transcript entries flushed right before exit
+        out_t.join(timeout=5)  # let the last events land before reading the result
         err_t.join(timeout=5)
         if proc.returncode != 0:
             _watch_finish(rid, "error", f"(agy exited {proc.returncode})", time.time() - start)
             stderr_tail = "".join(err_chunks)[-1000:]
             raise RuntimeError(f"agy exited {proc.returncode}\nstderr: {stderr_tail}")
 
+        # The stream's terminal `result` event is the answer, and its conversation_id
+        # is agy naming its own conversation — record it so a later continue pins to
+        # this thread (the same guarantee the non-watched path gained on 1.1.8).
+        if stream is not None:
+            if stream.conv_id:
+                _record_conv_id(workspace, stream.conv_id)
+            if stream.result is not None:
+                answer = (stream.result.get("response") or "").strip()
+                status = stream.result.get("status")
+                if answer:
+                    if status and status != "SUCCESS":
+                        log.warning("agy reported status=%s but returned an answer", status)
+                    _watch_finish(rid, "done", answer, time.time() - start)
+                    return answer
+                if status and status != "SUCCESS":
+                    _watch_finish(rid, "error", f"(agy status {status})", time.time() - start)
+                    raise RuntimeError(
+                        f"agy reported status={status} with no response "
+                        f"(conversation {stream.conv_id or 'unknown'})."
+                        + (f"\nstderr: {''.join(err_chunks)[-1000:]}" if err_chunks else "")
+                    )
+            # No usable result event (agy ignored the flag, or died mid-stream):
+            # fall through to the transcript scrape below, exactly as older agy does.
+
+        resolved_conv = (
+            pinned_conv or (stream.conv_id if stream else None) or (feed.conv if feed else None)
+        )
         deadline = time.time() + _RESPONSE_POLL_DEADLINE_S
         while True:
             try:
-                answer = _resolve_and_read(pinned_conv or feed.conv, workspace, start)
+                answer = _resolve_and_read(resolved_conv, workspace, start)
                 break
             except RuntimeError as exc:
                 if time.time() >= deadline:
@@ -2040,7 +2454,14 @@ def _run_agy_image_watched(
     save-path instructions that actually go to agy).
     """
     os.makedirs(workspace, exist_ok=True)  # agy's cwd must exist (mirrors the swarm)
-    args, _ = _build_agy_args(wrapped_prompt, workspace, False, timeout_s)
+    use_stream = supports_json_output()
+    args, _ = _build_agy_args(
+        wrapped_prompt,
+        workspace,
+        False,
+        timeout_s,
+        output_format="stream-json" if use_stream else None,
+    )
 
     with _AGY_LOCK:
         start = time.time()
@@ -2048,7 +2469,8 @@ def _run_agy_image_watched(
         if len(title) > 200:
             title = title[:200].rsplit(" ", 1)[0] + "…"
         rid = _watch_begin(title, start, timeout_s, prompt=display_prompt)
-        feed = _WatchFeed(None, start, rid)
+        stream = _StreamWatch(rid, start) if use_stream else None
+        feed = None if use_stream else _WatchFeed(None, start, rid)
         try:
             port = _ensure_watch_server()
             _open_watch_window(f"http://127.0.0.1:{port}/?id={rid}", rid)
@@ -2062,11 +2484,15 @@ def _run_agy_image_watched(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,  # line-buffered: stream-json events are consumed as they land
             **_spawn_kwargs(),
         )
         # Drain both pipes so a chatty agy can't fill the pipe buffer and hang (see
-        # _drain_pipe); the image answer itself still comes from the transcript/scratch.
-        out_t, _out = _drain_pipe(proc.stdout)
+        # _drain_pipe); with stream-json the stdout drain also parses the live events.
+        if stream is not None:
+            out_t, _out = _pump_pipe(proc.stdout, stream.feed_line)
+        else:
+            out_t, _out = _drain_pipe(proc.stdout)
         err_t, _err = _drain_pipe(proc.stderr)
         hard_deadline = start + timeout_s + 30
         while proc.poll() is None:
@@ -2074,20 +2500,33 @@ def _run_agy_image_watched(
                 proc.kill()
                 _watch_finish(rid, "error", "(timed out)", time.time() - start)
                 raise RuntimeError(f"agy timed out after {timeout_s + 30}s (image/watch)")
-            feed.pump()
+            if feed is not None:
+                feed.pump()
             time.sleep(_PROGRESS_POLL_INTERVAL_S)
-        feed.pump()
+        if feed is not None:
+            feed.pump()
         out_t.join(timeout=5)
         err_t.join(timeout=5)
 
-        # The transcript read may fail even though the image was written; don't lose
-        # a produced image to a transcript hiccup (mirrors antigravity_image).
+        # agy's reply names where it saved the image; _finalize_image uses it as a
+        # candidate path. Prefer the stream's result, then the transcript. Either may
+        # fail even though the image WAS written, so never lose a produced image to a
+        # read hiccup (mirrors antigravity_image).
         agy_text = None
         agy_error = None
-        try:
-            agy_text = _resolve_and_read(feed.conv, workspace, start)
-        except RuntimeError as e:
-            agy_error = e
+        if stream is not None and stream.conv_id:
+            _record_conv_id(workspace, stream.conv_id)
+        if stream is not None and stream.result is not None:
+            agy_text = (stream.result.get("response") or "").strip() or None
+        if agy_text is None:
+            try:
+                agy_text = _resolve_and_read(
+                    (stream.conv_id if stream else None) or (feed.conv if feed else None),
+                    workspace,
+                    start,
+                )
+            except RuntimeError as e:
+                agy_error = e
 
         try:
             final_path, fmt, size = _finalize_image(target, agy_text, start)
@@ -2173,7 +2612,10 @@ async def antigravity_continue(
 
     Resumes the exact conversation id recorded for `workspace` (via agy's
     --conversation flag), not agy's global "most recent", so it stays correct
-    even if agy was used elsewhere in between.
+    even if agy was used elsewhere in between. On agy 1.1.8+ that id is the one
+    agy itself reported for this bridge's last run in the workspace, so a
+    follow-up resumes THIS thread even if you have since started a separate
+    conversation in the same folder from Antigravity's own interface.
 
     Args:
         prompt: Follow-up message.

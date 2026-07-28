@@ -10,6 +10,94 @@ summary.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-28
+
+### Added
+
+- **agy 1.1.8 structured print-mode output — the bridge now asks for `--output-format json`.** 1.1.8
+  gave `-p` an `--output-format` flag (`text` | `json` | `stream-json`) plus `--json-schema`. Nothing
+  was broken by it (see *Changed*), but the `json` format is strictly better than reading bare text,
+  so `_run_agy` requests it whenever the installed agy is 1.1.8+. Verified live, the result is one
+  object — `{conversation_id, status, response, duration_seconds, num_turns, usage{…,
+  cache_read_tokens}}` — and it composes with every flag the bridge passes: a `--conversation`
+  continue came back `num_turns: 2` with conversation memory intact, `--model` round-tripped, and
+  `--dangerously-skip-permissions` is unaffected.
+- **Continue now pins to the conversation agy itself reported.** The real prize in that object is
+  `conversation_id`: agy telling the bridge *exactly* which conversation a run used. Previously that
+  could only be inferred from `last_conversations.json` — shared state agy rewrites for every session,
+  including your own interactive TUI work in the same folder — or from brain-dir mtimes. `_run_agy`
+  now records the id per workspace and `_build_agy_args` prefers it when pinning, falling back to
+  `last_conversations.json` and then `-c`. **Behavior worth knowing:** on agy 1.1.8+,
+  `antigravity_continue` resumes *the bridge's own* last thread in that workspace, where before it
+  could land on a conversation you had since started interactively in the same folder. That is what
+  the pinning always intended; it can only now be done exactly. The map is process-local, so a
+  restarted server simply falls back to the previous resolution order.
+
+### Changed
+
+- **⚠️ Behavior change: a multi-step answer now includes the model's narration.** agy's `response` is
+  the *whole turn* — every agent-response step concatenated. The old transcript scrape returned only
+  the **last** completed planner response. On a single-step ask the two are identical (verified:
+  `'0.21.4'` either way), but on a chatty multi-step run they differ — measured on one run, 297 chars
+  (`"I will first count the .py files.\nNext, I will print today's date.\n…\nCompleted counting .py
+  files (19 found)…"`) versus 128 for the final step alone, with the full answer *ending in* the old
+  one. The full turn is what every path now returns. Rationale: `result.response` is agy's own
+  contract for "what this turn produced", and this release's whole direction is to trust that
+  contract rather than the bridge's reconstruction of it. The last-step rule was never a product
+  decision — it was the best a transcript scrape could do — and it silently **drops content** whenever
+  the model does the real work and then closes with a short "Done." The cost is narration noise on
+  multi-step runs; the watch window exists to show that narration, but dropped content isn't
+  recoverable.
+- **Re-verified against agy 1.1.7 and 1.1.8 — nothing broke.** Before changing anything, the existing
+  text path was confirmed live on 1.1.8: ask, conversation-pinned continue, and `--model` all returned
+  clean. The new json path was then verified end-to-end through the bridge itself (answer, captured
+  `conversation_id`, same-thread continue, `--model`, a tool-heavy run, and the non-watched
+  `antigravity_image` path, which runs through `_run_agy` too). `VERIFIED_AGY_VERSION` → `(1, 1, 8)`
+  so `antigravity_status` stops reporting "newer than verified". The watched paths were verified the
+  same way — a live watched run, a live watched image generation, and the **pre-1.1.8 fallback**
+  exercised by forcing the support probe off against a real agy (no `--output-format` in argv,
+  transcript scrape, right answer).
+- **The version gate is deliberate.** On 1.1.8 an unrecognised `--output-format` *value* is silently
+  ignored and agy prints plain text (verified: `--output-format bogus` exited 0 with a normal answer),
+  but a pre-1.1.8 agy has no such *flag* and could fail arg parsing on every call. So
+  `supports_json_output()` checks the version and answers `False` when it can't be parsed, and
+  `_parse_json_result` returns `None` for anything that isn't the expected object — a
+  silently-ignored or removed flag degrades to the text path instead of crashing. An unexpected
+  `status` that still carries a `response` returns the answer rather than discarding it.
+- Structured output is **opt-in per caller**, not folded into `_agy_base_args`: the watch and image
+  runners read agy's stdout as text while polling the transcript for live progress, and the swarm
+  workers build their own argv, so only the plain ask/continue path requests it.
+- Nothing else in 1.1.7 or 1.1.8 reaches the bridge. 1.1.7's `-p` fix (it sent a prompt before the
+  account-eligibility check finished) is a benign win on the exact path the bridge drives; its
+  disabled-plugins-still-running-hooks fix, MCP OAuth relaxation (agy as an MCP **client** — the
+  opposite direction from this bridge), `/btw` first-action crash, and Windows CJK clipboard fix are
+  interactive or client-side. Same for the rest of 1.1.8: `copyOnSelect` is a TUI setting, and the
+  compound-command allow-always improvement is an interactive permission-prompt change that print mode
+  bypasses anyway.
+
+- **Watch mode now reads agy's event stream instead of scraping its transcript.** The watched runners
+  (`antigravity_ask/continue` with `watch=true`, and watched image generation) request
+  `--output-format stream-json` and consume agy's typed NDJSON events — `init` / `step_update` /
+  `result` — live off stdout, via the new `_StreamWatch`. The premise was verified *before* the
+  rewrite: events arrive **incrementally** (a 17 s run spread its 18 events over 12.4 s), and a live
+  watched run through the bridge grew its step count 0 → 3 → 6 → 7 while agy worked. What the stream
+  gives that the scrape could not: the real `tool_info.parameters.CommandLine` as a nested object
+  (the transcript stores tool args JSON-encoded *inside a string* — that's what `_clean_tool_arg`
+  unwraps), `text_delta` fragments per response step, explicit `ACTIVE`→`DONE` transitions, and a
+  `conversation_id`. Consequence: a **watched** run now records its conversation for later pinning
+  exactly like the plain path, closing an asymmetry where watch still leaned on
+  `last_conversations.json`. This retires the timer-based transcript polling on agy 1.1.8+ — notable
+  because agy has announced JSONL is going away in favour of SQLite, and watch was the last path that
+  would have broken when it does.
+- **`watch=true` and `watch=false` can no longer disagree about the answer.** Both now read the same
+  `response` field from agy's result. Previously the watched path returned the transcript's last
+  planner response while the plain path returned agy's `response`.
+
+### Not adopted
+
+- **`--json-schema`** — works (verified: it adds a validated `structured_output` object alongside the
+  prose `response`), but no bridge tool currently needs a caller-supplied schema.
+
 ## [0.21.4] - 2026-07-24
 
 ### Changed
@@ -669,7 +757,8 @@ summary.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.4...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.4...v0.22.0
 [0.21.4]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.3...v0.21.4
 [0.21.3]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.2...v0.21.3
 [0.21.2]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.1...v0.21.2

@@ -13,7 +13,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![MCP server](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io/)
 [![Glama](https://glama.ai/mcp/servers/SinanTufekci/agent-intern/badges/score.svg)](https://glama.ai/mcp/servers/SinanTufekci/agent-intern)
-[![agy 1.1.6 verified](https://img.shields.io/badge/agy-1.1.6%20verified-2ea44f)](https://antigravity.google/)
+[![agy 1.1.8 verified](https://img.shields.io/badge/agy-1.1.8%20verified-2ea44f)](https://antigravity.google/)
 [![codex 0.144.1 verified](https://img.shields.io/badge/codex--cli-0.144.1%20verified-2ea44f)](https://developers.openai.com/codex/)
 [![copilot 1.0.69 verified](https://img.shields.io/badge/copilot--cli-1.0.69%20verified-2ea44f)](https://docs.github.com/en/copilot/how-tos/copilot-cli)
 [![cursor 2026.07.08 verified](https://img.shields.io/badge/cursor--agent-2026.07.08%20verified-2ea44f)](https://cursor.com/cli)
@@ -87,7 +87,7 @@ The bridge normalizes all four CLIs into the same shape, but they differ where i
 | **Best at** | Fast, cheap tool-calling; quick answers | Heavier reasoning; real code/repo work | Agentic coding; real code/repo work | Agentic coding; wide model menu (GPT/Claude/Grok/Composer) |
 | **Image generation** | ✅ `antigravity_image` (+ `antigravity_image_swarm`) | ❌ no image model | ❌ no image model | ❌ no image model |
 | **Sandbox** | ❌ no real boundary (`--sandbox` blocks only shell) | ✅ real, enforced: `read-only` / `workspace-write` / `danger-full-access` | ⚠️ best-effort: tool/path permissions (`read-only` denies write/shell) — **not** an OS sandbox | ⚠️ agent-enforced: mode/force (`read-only` = `--mode ask`, write/shell tools unavailable) — **not** an OS sandbox |
-| **How the answer is read** | stdout on agy 1.0.15+ (Windows); else scraped from `transcript.jsonl` | Written to a file via `-o/--output-last-message` | stdout (`-s` silent mode) | stdout (`--output-format text`) |
+| **How the answer is read** | `--output-format json` on agy 1.1.8+ (`stream-json` when watching); else stdout, else scraped from `transcript.jsonl` | Written to a file via `-o/--output-last-message` | stdout (`-s` silent mode) | stdout (`--output-format text`) |
 | **Continue mechanism** | Pins the workspace's conversation id (`--conversation`) | Resumes the session id (`codex exec resume <id>`) | Resumes a self-set session UUID (`--session-id`) | Mints a chat id (`create-chat`) and resumes it (`--resume <id>`) |
 | **Auth** | OS credential store (AI Pro session) | `codex login` (ChatGPT account or API key) | OS credential store (`copilot login`) or a GitHub token env | `cursor-agent login` (OS credential store) or `CURSOR_API_KEY` |
 | **In a swarm** | Runs with an isolated `HOME` to avoid state races | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation |
@@ -104,27 +104,33 @@ flowchart LR
     B -- "codex_*" --> D[codex exec]
     B -- "copilot_*" --> E[copilot -p]
     B -- "cursor_*" --> F[cursor-agent -p]
-    C -- "stdout (1.0.15+)<br/>or transcript.jsonl / .db" --> B
+    C -- "json / stream-json (1.1.8+)<br/>else stdout or transcript.jsonl / .db" --> B
     D -- "output-last-message file" --> B
     E -- "stdout (-s silent)" --> B
     F -- "stdout (--output-format text)" --> B
     B -- "plain text" --> A
 ```
 
-**Antigravity.** On agy **1.0.15+** (Windows), `agy -p` writes its clean final answer straight to
-stdout, and the bridge returns that directly. On older agy — or non-Windows, or a `--sandbox` run —
-stdout stays empty and the bridge falls back to agy's own transcript at:
+**Antigravity.** On agy **1.1.8+** the bridge asks for structured output and reads a contractual
+field instead of guessing: plain calls use `--output-format json` and return its `response`, while
+[watch mode](#watch-mode) uses `--output-format stream-json` and rebuilds the answer from the stream's
+terminal `result` event (the same shape the [Cursor bridge](#cursor) already used). Both also carry a
+`conversation_id`, which the bridge records so `antigravity_continue` pins **exactly** the thread it
+last ran in that workspace.
+
+Older agy has no such flag, so the original path stays: on **1.0.15+** (Windows) `agy -p` writes its
+clean answer to stdout and the bridge returns that; on older agy — or non-Windows, or a `--sandbox`
+run — stdout is empty and the bridge falls back to agy's own transcript at:
 
 ```
 ~/.gemini/antigravity-cli/brain/<conv-id>/.system_generated/logs/transcript.jsonl
 ```
 
-For the fallback it locates the conversation via `cache/last_conversations.json` (falling back to the
+For that fallback it locates the conversation via `cache/last_conversations.json` (falling back to the
 newest `brain/` directory touched since launch), streams the transcript, and returns the final
 `source=MODEL, status=DONE, type=PLANNER_RESPONSE` entry — the answer, minus the intermediate
-tool-calling steps (or the SQLite `.db` agy dual-writes, when no JSONL exists). Either way,
-`antigravity_continue` pins the workspace's **exact** conversation id via `--conversation`, so it
-never resumes the wrong thread.
+tool-calling steps (or the SQLite `.db` agy dual-writes, when no JSONL exists). This fallback still
+runs on 1.1.8+ whenever a run yields no `result`, so nothing depends on the structured path alone.
 
 **Codex.** `codex exec` is well-behaved: the bridge passes `-o/--output-last-message <file>` and
 codex writes its final message straight there — no scraping. Continue works by capturing the session
@@ -429,8 +435,9 @@ the agent work live in a little chat-style browser window** called **Agent Inter
 still runs headless; alongside it the bridge serves a tiny page on `127.0.0.1` and opens it in a
 small, chromeless app window that renders the exchange as a **conversation**: your prompt shows as a
 chat bubble, the agent's live steps stream in a collapsible "thinking" trace — its planner narration
-(▸), the **real commands** it runs (`$`), and completions (✓), read live (from agy's transcript, or
-codex's / copilot's JSON event stream, or cursor's `--output-format stream-json`) — and the final
+(▸), the **real commands** it runs (`$`), and completions (✓), read live (from agy's
+`--output-format stream-json` on 1.1.8+ — its transcript on older agy — or codex's / copilot's JSON
+event stream, or cursor's `--output-format stream-json`) — and the final
 answer arrives as a Markdown card (and, for
 `antigravity_image` with `watch=true`, the generated image shown inline). A **`*_continue`** run
 opens with the **prior turns of the conversation shown as history**, so it reads as one ongoing
@@ -703,7 +710,8 @@ defaults to **`gemini-3.6-flash-high`** as of agy 1.1.6 — speed-optimized for 
 
 **agy 1.1.5 renamed every model**, replacing the old human labels (`"Gemini 3.1 Pro (High)"`) with
 stable slugs (`gemini-3.1-pro-high`) — the old form is no longer accepted, so pass slugs. **agy 1.1.6
-then added the `gemini-3.6-flash` family and moved the default to it.** The full list as of 1.1.6:
+then added the `gemini-3.6-flash` family and moved the default to it.** The full list, re-checked live
+on 1.1.8 and unchanged since 1.1.6:
 `gemini-3.6-flash-low|medium|high`, `gemini-3.5-flash-low|medium|high`, `gemini-3.1-pro-low|high`,
 `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`. Note the slug bakes in the
 reasoning effort, which is why the flash and pro models appear once per level.
@@ -750,7 +758,10 @@ token-by-token), and the returned value is identical to the non-watch call.
 
 The **single-agent** tools are **serialized** inside the server: agy rewrites `last_conversations.json`
 on every call, so concurrent runs sharing one state dir would race and could return the wrong
-conversation. A `threading.Lock` makes extra requests queue rather than race.
+conversation. A `threading.Lock` makes extra requests queue rather than race. (On agy 1.1.8+ the
+bridge also records the `conversation_id` agy reports for each run and prefers it when pinning a
+continue, so that resolution no longer depends on the shared file — but the lock stays, since agy's
+state dir is still shared and a fresh server process starts with nothing recorded.)
 
 For real parallelism use **[`agent_swarm`](#swarm)** — each agy worker runs in its own isolated state
 dir (and Codex/Copilot/Cursor workers need none), so they don't race and the lock isn't needed (~2.8×
@@ -759,6 +770,37 @@ at 3 workers). That's the supported way to run many calls at once, across any ba
 
 ## Status & caveats
 
+- ✅ **Verified on agy 1.1.7 and 1.1.8 — nothing broke, and 1.1.8 made the bridge sturdier.** 1.1.8
+  gave print mode an `--output-format` flag (`text` | `json` | `stream-json`). The existing text path
+  was confirmed live on 1.1.8 first (ask, pinned continue, and `--model` all clean), then the bridge
+  switched its plain ask/continue calls to `--output-format json`, because reading a contractual
+  `response` field beats trusting the layout of bare text. The real prize is the `conversation_id`
+  agy returns with it: the bridge records it and **pins a later `antigravity_continue` to exactly the
+  conversation it last ran in that workspace**, instead of inferring it from `last_conversations.json`
+  — shared state agy rewrites for *every* session, including your own interactive TUI work in the same
+  folder. Practical difference: `antigravity_continue` now resumes *the bridge's own* thread, where
+  before it could land on a conversation you'd since started in the Antigravity TUI. Older agy is
+  unaffected — the flag is version-gated (pre-1.1.8 has no such flag), and any non-JSON stdout falls
+  back to the previous text path, so a silently-ignored flag degrades instead of crashing.
+  `VERIFIED_AGY_VERSION` → `(1, 1, 8)`. Not adopted: `--json-schema` (works; nothing here needs it).
+  Nothing else in 1.1.7/1.1.8 reaches the bridge — the rest is interactive-TUI, plugin-hook, and
+  MCP-*client* work.
+- ✅ **[Watch mode](#watch-mode) reads agy's live event stream instead of scraping its transcript.**
+  On agy 1.1.8+ the watched runners request `--output-format stream-json` and consume agy's typed
+  `init` / `step_update` / `result` events straight off stdout. Verified before the rewrite that they
+  arrive **incrementally** (a 17 s run spread its 18 events over 12.4 s), and confirmed live that a
+  watched run's step count grows while agy works. The stream carries the real command as a nested
+  object (the transcript stored tool args JSON-encoded *inside a string*), streaming text fragments,
+  and a `conversation_id` — so a watched run now pins later continues just like a plain one. This
+  retires the timer-based transcript polling, which matters beyond tidiness: agy has announced JSONL
+  is being replaced by SQLite, and watch was the last path that would have broken when it goes.
+  Pre-1.1.8 agy keeps the original transcript path, re-verified live.
+- ⚠️ **Behavior change: multi-step answers now include the model's narration.** agy's `response` is
+  the whole turn; the old transcript scrape returned only the last planner response. Identical for a
+  single-step ask, different for a chatty multi-step one (one measured run: 297 chars vs 128, the
+  full answer *ending in* the old one). The full turn is now returned on every path — `response` is
+  agy's own contract for what the turn produced, and the old last-step rule silently dropped content
+  whenever the model did the work and then closed with a short "Done."
 - ✅ **Re-verified on agy 1.1.6 — no code change needed.** 1.1.6 added the `gemini-3.6-flash` family
   to `agy models` and moved the `settings.json` default to **Gemini 3.6 Flash (High)**; the default
   path and `--model gemini-3.6-flash-high` both round-tripped clean, and the JSONL + SQLite read paths
