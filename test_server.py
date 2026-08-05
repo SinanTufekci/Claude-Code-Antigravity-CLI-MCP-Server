@@ -11,6 +11,7 @@ import asyncio
 import io
 import json
 import os
+import secrets
 import sqlite3
 import subprocess
 import time
@@ -1767,6 +1768,64 @@ class _FakePopen:
 # --------------------------------------------------------------------------
 # watch mode: browser viewer state + _WatchFeed + _run_agy_watched
 # --------------------------------------------------------------------------
+
+
+def _tok() -> str:
+    return server._WATCH_TOKEN
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:8765", "localhost:8765", "127.0.0.1", "LOCALHOST"])
+def test_watch_authorized_accepts_loopback_with_token(host):
+    assert server._watch_authorized(host, f"/events?id=main&k={_tok()}") is True
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "evil.example.com:8765",  # classic DNS-rebinding Host
+        "127.0.0.1.nip.io:8765",  # resolves to loopback, but is NOT a loopback name
+        "attacker.local",
+        "",  # every browser sends Host; a missing one is not our viewer
+        None,
+    ],
+)
+def test_watch_authorized_rejects_non_loopback_host(host):
+    """The Host check is what actually kills DNS rebinding: the attacker's page
+    reaches the port under THEIR hostname, so refusing anything that isn't a
+    loopback literal closes the vector regardless of the token.
+    """
+    assert server._watch_authorized(host, f"/events?id=main&k={_tok()}") is False
+
+
+@pytest.mark.parametrize("query", ["", "?id=main", "?id=main&k=", "?id=main&k=wrong-token"])
+def test_watch_authorized_rejects_missing_or_wrong_token(query):
+    """A local process can send whatever Host it likes, so the token is the part
+    that stops another user/process on the same machine from reading prompts.
+    """
+    assert server._watch_authorized("127.0.0.1:8765", f"/events{query}") is False
+
+
+def test_watch_token_is_not_predictable():
+    assert len(server._WATCH_TOKEN) >= 16
+    assert server._WATCH_TOKEN != secrets.token_urlsafe(16)
+
+
+def test_watch_url_carries_id_and_token():
+    url = server._watch_url(4321, "rid-9")
+    assert url.startswith("http://127.0.0.1:4321/?id=rid-9&k=")
+    assert server._WATCH_TOKEN in url
+    # and the URL the bridge opens must itself pass the guard
+    path = url.split("127.0.0.1:4321", 1)[1]
+    assert server._watch_authorized("127.0.0.1:4321", path) is True
+
+
+def test_swarm_watch_shares_the_same_guard():
+    """The swarm dashboard exposes every worker's prompt at once, so it must not
+    have its own weaker copy of the check.
+    """
+    import swarm_watch
+
+    assert swarm_watch._watch_authorized is server._watch_authorized
 
 
 def test_watch_state_lifecycle():

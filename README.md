@@ -480,6 +480,14 @@ its transcript in an opaque SQLite blob, so its window opens without visible pri
   `copilot_ask` at once) each stream into their own view and never clobber each other.
   If you closed the window, the next run opens a fresh one. Set **`AGY_WATCH_ALWAYS_NEW=1`**
   to force a new window every time.
+- **Access control.** The viewer is an HTTP server, and it serves your prompts, the answers, and
+  the real commands the agents ran — so it binds `127.0.0.1` on an ephemeral port **and** requires
+  two things on every request: a **loopback `Host` header** (which is what makes DNS rebinding
+  fail — a rebound page arrives under the attacker's hostname) and a **per-process token** carried
+  in the URL, which stops another local process or another user on a shared machine from simply
+  connecting. The bridge puts the token in every URL it opens, so none of this is visible in
+  normal use. Worth knowing because the server starts lazily but is never stopped: one
+  `watch=true` run leaves the port listening for the life of the MCP server.
 - **Chat layout & history.** Prompts render as chat bubbles (labelled **CLAUDE**, since the MCP
   client writes them) — long ones clamp to a few lines with a **show more / show less** toggle — and
   answers as Markdown cards tagged with the backend (**AGY** / **CODEX** / **COPILOT** / **CURSOR**). A

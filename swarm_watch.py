@@ -24,7 +24,13 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
 
-from server import _chromium_app_browsers, _detect_image_format, _env_truthy
+import server
+from server import (
+    _chromium_app_browsers,
+    _detect_image_format,
+    _env_truthy,
+    _watch_authorized,
+)
 
 _STATE: dict = {"title": "Agent Swarm", "started": 0.0, "timeout": 0.0, "workers": []}
 _LOCK = threading.Lock()
@@ -123,6 +129,13 @@ def ensure_server() -> int:
             self.wfile.write(body)
 
         def do_GET(self):  # noqa: N802
+            # Same guard as the single-run viewer: loopback Host + the process
+            # token. This dashboard exposes every worker's prompt and steps at
+            # once, so it is the bigger of the two leaks. See _watch_authorized.
+            if not _watch_authorized(self.headers.get("Host"), self.path):
+                self.send_response(403)
+                self.end_headers()
+                return
             if self.path.startswith("/events"):
                 global _LAST_POLL
                 _LAST_POLL = time.time()
@@ -141,9 +154,10 @@ def ensure_server() -> int:
             elif self.path.startswith("/worker"):
                 self._send(_WORKER_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif self.path.startswith("/image"):
-                from urllib.parse import unquote
+                from urllib.parse import parse_qs, urlparse
 
-                path = unquote(self.path.split("?", 1)[1]) if "?" in self.path else ""
+                # `p`, not the bare query string: the token shares the query now.
+                path = parse_qs(urlparse(self.path).query).get("p", [""])[0]
                 fmt = (
                     _detect_image_format(path)
                     if path in _allowed_images() and os.path.isfile(path)
@@ -227,7 +241,7 @@ def open_window(n_workers: int) -> None:
     # workers and shrink as more are added.
     w, h, x, y = 440, 660, 40, 60
     _GEO.update(x=x, y=y, w=w, h=h)
-    url = f"http://127.0.0.1:{_port()}/"
+    url = f"http://127.0.0.1:{_port()}/?k={server._WATCH_TOKEN}"
     if _dashboard_is_live() and not _env_truthy("AGY_WATCH_ALWAYS_NEW"):
         print(f"[swarm-watch] reusing open dashboard: {url}", flush=True)
         return
@@ -239,7 +253,7 @@ def open_worker_window(index: int) -> None:
     """Open a dedicated detail window for one worker, right beside the dashboard."""
     x = _GEO["x"] + _GEO["w"] + 14
     y = _GEO["y"] + index * 28  # slight cascade so multiple detail windows don't fully overlap
-    _launch(f"http://127.0.0.1:{_port()}/worker?i={index}", 680, 820, x, y)
+    _launch(f"http://127.0.0.1:{_port()}/worker?i={index}&k={server._WATCH_TOKEN}", 680, 820, x, y)
 
 
 # ------------------------------------------------------------------- dashboard page
@@ -309,7 +323,8 @@ const SYM={narration:"▸",command:"$",result:"✓",done:"✓",error:"✗"};
 const FR="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";let fi=0;
 let started=null,sel=-1,nWork=0,timeout=0,statuses={};
 const $=id=>document.getElementById(id);
-function openWorker(i){fetch("/open?i="+i,{cache:"no-store"}).catch(()=>{});}
+const K=encodeURIComponent(new URLSearchParams(location.search).get("k")||"");
+function openWorker(i){fetch("/open?i="+i+"&k="+K,{cache:"no-store"}).catch(()=>{});}
 function esc(s){return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 function cut(s,n){s=s||"";return s.length>n?s.slice(0,n)+"…":s;}
 function applySel(){for(let i=0;i<nWork;i++){const p=$("p"+i);if(p)p.classList.toggle("sel",i===sel);}}
@@ -342,7 +357,7 @@ document.addEventListener("keydown",e=>{
 async function tick(){
  fi=(fi+1)%FR.length;
  try{
-  const s=await(await fetch("/events",{cache:"no-store"})).json();
+  const s=await(await fetch("/events?k="+K,{cache:"no-store"})).json();
   if(s.started!==started){started=s.started;nWork=s.workers.length;timeout=s.timeout||0;build(s.workers);}
   s.workers.forEach(w=>{
    const p=$("p"+w.index);
@@ -473,6 +488,7 @@ header{display:flex;align-items:center;gap:8px;padding:9px 14px;background:#0d0f
 <script>
 const SYM={narration:"▸",command:"$",result:"✓"};
 const IDX=parseInt(new URLSearchParams(location.search).get("i")||"0",10);
+const K=encodeURIComponent(new URLSearchParams(location.search).get("k")||"");
 let started=null,seen=0,fin=false,follow=true,timeout=0,traceEl=null,traceBody=null;
 const $=id=>document.getElementById(id);
 const chat=()=>$("chat");
@@ -574,7 +590,7 @@ function finish(w,back){
   const m=document.createElement("div");m.className="msg bot";
   const wrap=document.createElement("div");wrap.className="wrap";
   const im=document.createElement("img");im.className="shot";
-  im.onload=maybeBottom;im.src="/image?"+encodeURIComponent(w.image);
+  im.onload=maybeBottom;im.src="/image?k="+K+"&p="+encodeURIComponent(w.image);
   wrap.appendChild(im);m.appendChild(wrap);chat().appendChild(m);
  }
  if(w.answer){
@@ -591,7 +607,7 @@ function finish(w,back){
 }
 async function tick(){
  try{
-  const s=await(await fetch("/events",{cache:"no-store"})).json();
+  const s=await(await fetch("/events?k="+K,{cache:"no-store"})).json();
   const w=s.workers[IDX];
   if(w){
    const back=w.backend||"agy";const bname=back==="codex"?"codex":back==="copilot"?"copilot":back==="cursor"?"cursor":"agy";

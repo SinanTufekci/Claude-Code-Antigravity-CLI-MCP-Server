@@ -10,6 +10,38 @@ summary.
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-08-05
+
+Hardens the **watch viewer**, the one part of the bridge that opens a network
+listener. No behaviour change: watch mode works exactly as before. Found by reviewing a
+downstream fork that had disabled the viewer outright in its own deployment — the underlying
+observation was right, but disabling it costs the feature, and a Host check does not.
+
+### Security
+
+- **The watch viewer served prompts, answers, and the commands agents ran with no access
+  check.** Both HTTP servers (`server.py`'s single-run viewer and `swarm_watch.py`'s swarm
+  dashboard) bind `127.0.0.1` on an ephemeral port, but binding is not an access boundary — and
+  the server is started lazily and **never stopped**, so one `watch=true` run leaves the port
+  open for the life of the process, not just the run. Every request now passes
+  `_watch_authorized`, which applies two independent checks:
+  - **Host must be a loopback literal** (`127.0.0.1` / `localhost` / `::1`, port ignored; a
+    missing Host is refused). This is what closes **DNS rebinding**: a rebound page reaches the
+    port under the *attacker's* hostname, so the check rejects it regardless of anything else.
+    Names that merely *resolve* to loopback (`127.0.0.1.nip.io`) are refused too.
+  - **A per-process token** (`secrets.token_urlsafe`, compared with `hmac.compare_digest`)
+    carried as `k` in the query. The Host check cannot stop another local process — it can send
+    any Host it likes — but the token can, which matters on shared or multi-user machines. It
+    costs nothing in UX because the bridge opens every one of these URLs itself.
+
+  Verified over real sockets against both servers: loopback+token → 200, missing token → 403,
+  wrong token → 403, rebinding Host with a *valid* token → 403. The served pages were checked to
+  carry the token through every `fetch` they make, so the viewer still polls normally.
+- **`/image` now takes its path as a named `p` parameter** instead of "everything after the `?`",
+  which the token sharing the query string would otherwise have corrupted. Its allowlist is
+  unchanged and was already tight — `_watch_image_allowed` requires an exact match against a
+  registered run's image path, so it was never an arbitrary file read.
+
 ## [0.23.0] - 2026-08-05
 
 agy **1.1.9 silently broke print mode** for a whole class of prompt, and a
@@ -876,7 +908,8 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.4...v0.22.0

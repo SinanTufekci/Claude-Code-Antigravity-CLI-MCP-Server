@@ -316,10 +316,12 @@ whole bridge inside a container or VM.
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -397,7 +399,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.23.0"
+__version__ = "0.23.1"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -1760,6 +1762,55 @@ def _watch_mark_poll(rid: str) -> None:
             st["last_poll"] = time.time()
 
 
+# Per-process secret for the watch viewer. The bridge embeds it in every URL it
+# opens; a request without it is refused. Regenerated each run, never persisted.
+_WATCH_TOKEN = secrets.token_urlsafe(16)
+
+# Hostnames a watch request may claim. Anything else is a rebinding attempt.
+_WATCH_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def _watch_authorized(host_header: Optional[str], path: str) -> bool:
+    """Whether a watch-server request may be served. Two independent checks.
+
+    The viewer serves the prompts, the answers, and the real commands the agents
+    ran. It binds 127.0.0.1 on an ephemeral port, but binding alone is not an
+    access boundary, and the server is started lazily and never stopped — one
+    watch=true run leaves the port open for the life of the process.
+
+    HOST: the Host header's hostname must be a loopback literal. A browser
+    reaches a DNS-rebinding target under the ATTACKER's hostname, so rejecting
+    anything that isn't 127.0.0.1/localhost kills that vector outright — it is
+    the standard defense, and cheaper than any origin allowlist. A missing Host
+    is refused; every browser sends one, and the browser we launch is the only
+    client this server has.
+
+    TOKEN: a per-process secret carried as `k` in the query string, compared with
+    hmac.compare_digest. The Host check cannot stop another LOCAL process (or
+    another user on a shared machine) from simply connecting, since it can send
+    whatever Host it likes; the token can, and costs nothing because the bridge
+    opens every one of these URLs itself.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    host = (host_header or "").strip()
+    if not host:
+        return False
+    if host.startswith("["):  # IPv6 literal, optionally followed by :port
+        hostname = host[: host.find("]") + 1]
+    else:
+        hostname = host.rsplit(":", 1)[0] if ":" in host else host
+    if hostname.lower() not in _WATCH_LOCAL_HOSTS:
+        return False
+    token = parse_qs(urlparse(path).query).get("k", [""])[0]
+    return hmac.compare_digest(token, _WATCH_TOKEN)
+
+
+def _watch_url(port: int, rid: str) -> str:
+    """The viewer URL for `rid`, carrying the token the server requires."""
+    return f"http://127.0.0.1:{port}/?id={rid}&k={_WATCH_TOKEN}"
+
+
 def _watch_image_allowed(path: str) -> bool:
     with _WATCH_LOCK:
         return bool(path) and any(s["image"] == path for s in _WATCH_RUNS.values())
@@ -2066,6 +2117,7 @@ document.addEventListener("keydown",e=>{
 const SYM={narration:"▸",command:"$",result:"✓"};
 let started=null,seen=0,finished=false,follow=true,traceEl=null,traceBody=null;
 const RID=new URLSearchParams(location.search).get("id")||"main";
+const K=encodeURIComponent(new URLSearchParams(location.search).get("k")||"");
 const $=id=>document.getElementById(id);
 const chat=()=>$("chat");
 function toBottom(){window.scrollTo(0,document.body.scrollHeight);}
@@ -2192,7 +2244,7 @@ function finish(s){
   const m=document.createElement("div");m.className="msg bot";
   const wrap=document.createElement("div");wrap.className="wrap";
   const im=document.createElement("img");im.className="shot";
-  im.onload=maybeBottom;im.src="/image?"+encodeURIComponent(s.image);
+  im.onload=maybeBottom;im.src="/image?k="+K+"&p="+encodeURIComponent(s.image);
   wrap.appendChild(im);m.appendChild(wrap);chat().appendChild(m);
  }
  if(s.answer)botCard(s.answer,true,(s.backend||"agy").toUpperCase());
@@ -2200,7 +2252,7 @@ function finish(s){
 }
 async function tick(){
  try{
-  const s=await (await fetch("/events?id="+RID,{cache:"no-store"})).json();
+  const s=await (await fetch("/events?id="+RID+"&k="+K,{cache:"no-store"})).json();
   if(s.started!==started){started=s.started;rebuild(s);}
   const back=s.backend||"agy";
   $("wlabel").textContent="— watching "+back;
@@ -2237,6 +2289,9 @@ def _ensure_watch_server() -> int:
     """Lazily start the localhost watch server (once per process); return its port.
 
     Binds 127.0.0.1 only — the page and events never leave the local machine.
+    Started lazily but never stopped, so once any watch=true run happens the port
+    stays open for the life of the process; see _watch_authorized for why that
+    makes the Host check and the token load-bearing rather than decorative.
     """
     global _WATCH_SERVER
     if _WATCH_SERVER is not None:
@@ -2254,6 +2309,10 @@ def _ensure_watch_server() -> int:
             self.wfile.write(body)
 
         def do_GET(self):  # noqa: N802 (http.server API)
+            if not _watch_authorized(self.headers.get("Host"), self.path):
+                self.send_response(403)
+                self.end_headers()
+                return
             if self.path.startswith("/events"):
                 from urllib.parse import parse_qs, urlparse
 
@@ -2261,9 +2320,12 @@ def _ensure_watch_server() -> int:
                 _watch_mark_poll(rid)
                 self._send(json.dumps(_watch_snapshot(rid)).encode("utf-8"), "application/json")
             elif self.path.startswith("/image"):
-                from urllib.parse import unquote
+                from urllib.parse import parse_qs, urlparse
 
-                path = unquote(self.path.split("?", 1)[1]) if "?" in self.path else ""
+                # `p`, not the bare query string: the token now shares the query,
+                # so the path must be a named parameter rather than "everything
+                # after the ?".
+                path = parse_qs(urlparse(self.path).query).get("p", [""])[0]
                 fmt = (
                     _detect_image_format(path)
                     if _watch_image_allowed(path) and os.path.isfile(path)
@@ -2420,7 +2482,7 @@ def _run_agy_watched(
         feed = None if use_stream else _WatchFeed(pinned_conv, start, rid)
         try:
             port = _ensure_watch_server()
-            _open_watch_window(f"http://127.0.0.1:{port}/?id={rid}", rid)
+            _open_watch_window(_watch_url(port, rid), rid)
         except Exception:  # noqa: BLE001 - the viewer is best-effort, never fatal
             pass
 
@@ -2542,7 +2604,7 @@ def _run_agy_image_watched(
         feed = None if use_stream else _WatchFeed(None, start, rid)
         try:
             port = _ensure_watch_server()
-            _open_watch_window(f"http://127.0.0.1:{port}/?id={rid}", rid)
+            _open_watch_window(_watch_url(port, rid), rid)
         except Exception:  # noqa: BLE001 - viewer is best-effort
             pass
 
@@ -3111,7 +3173,7 @@ def _run_codex_watched(
     rid = _watch_begin(title, start, timeout_s, backend="codex", prompt=prompt, history=history)
     try:
         port = _ensure_watch_server()
-        _open_watch_window(f"http://127.0.0.1:{port}/?id={rid}", rid)
+        _open_watch_window(_watch_url(port, rid), rid)
     except Exception:  # noqa: BLE001 — the viewer is best-effort, never fatal
         pass
 
@@ -3331,7 +3393,7 @@ def _run_copilot_watched(
     rid = _watch_begin(title, start, timeout_s, backend="copilot", prompt=prompt, history=history)
     try:
         port = _ensure_watch_server()
-        _open_watch_window(f"http://127.0.0.1:{port}/?id={rid}", rid)
+        _open_watch_window(_watch_url(port, rid), rid)
     except Exception:  # noqa: BLE001 — the viewer is best-effort, never fatal
         pass
 
@@ -3563,7 +3625,7 @@ def _run_cursor_watched(
     rid = _watch_begin(title, start, timeout_s, backend="cursor", prompt=prompt, history=history)
     try:
         port = _ensure_watch_server()
-        _open_watch_window(f"http://127.0.0.1:{port}/?id={rid}", rid)
+        _open_watch_window(_watch_url(port, rid), rid)
     except Exception:  # noqa: BLE001 — the viewer is best-effort, never fatal
         pass
 
