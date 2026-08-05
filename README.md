@@ -13,10 +13,10 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![MCP server](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io/)
 [![Glama](https://glama.ai/mcp/servers/SinanTufekci/agent-intern/badges/score.svg)](https://glama.ai/mcp/servers/SinanTufekci/agent-intern)
-[![agy 1.1.8 verified](https://img.shields.io/badge/agy-1.1.8%20verified-2ea44f)](https://antigravity.google/)
+[![agy 1.1.10 verified](https://img.shields.io/badge/agy-1.1.10%20verified-2ea44f)](https://antigravity.google/)
 [![codex 0.144.1 verified](https://img.shields.io/badge/codex--cli-0.144.1%20verified-2ea44f)](https://developers.openai.com/codex/)
 [![copilot 1.0.69 verified](https://img.shields.io/badge/copilot--cli-1.0.69%20verified-2ea44f)](https://docs.github.com/en/copilot/how-tos/copilot-cli)
-[![cursor 2026.07.08 verified](https://img.shields.io/badge/cursor--agent-2026.07.08%20verified-2ea44f)](https://cursor.com/cli)
+[![cursor 2026.07.23 verified](https://img.shields.io/badge/cursor--agent-2026.07.23%20verified-2ea44f)](https://cursor.com/cli)
 [![platform](https://img.shields.io/badge/platform-Windows%20·%20macOS%20·%20Linux-lightgrey)](#requirements)
 [![Sponsor](https://img.shields.io/github/sponsors/SinanTufekci?logo=githubsponsors&label=Sponsor&color=ea4aaa)](https://github.com/sponsors/SinanTufekci)
 
@@ -562,7 +562,7 @@ quota/rate-limit pressure for wall-clock.
 
 | | 🛰️ **Antigravity** | 🤖 **Codex** | 🐙 **Copilot** | ✳️ **Cursor** |
 |---|---|---|---|---|
-| **Model** | **Selectable** via the `model` argument (agy's `--model`, e.g. `"gemini-3.1-pro-high"`, `"claude-sonnet-4-6"`); omit to use the `"model"` field in agy's `settings.json` (**`gemini-3.6-flash-high`** by default as of 1.1.6). **agy 1.1.5 replaced the old human labels with these slugs** — the old `"Gemini 3.1 Pro (High)"` form no longer works. Switching model in `-p` used to hang (through ~1.0.14) but is **fixed as of 1.0.16**. An unknown model was silently ignored through 1.1.1 and hard-fails in `-p` as of **1.1.2**; either way the bridge validates it against `agy models` and rejects a typo up front. Flash High is speed-optimized for cheap tool-calling; pick a bigger model for heavier work. | **Selectable** via the `model` argument (codex's `-m`). codex does not hang on a switch, so model choice is a first-class knob. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.3-codex`, `claude-sonnet-4.6`, `auto`); omit for your account default. An unavailable model errors immediately. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.2`, `sonnet-4-thinking`, `auto`, or parameterized ids like `claude-opus-4-8[context=1m]`); a wide GPT/Claude/Grok/Composer menu, validated against `cursor-agent models` (a typo is rejected up front). Omit for your Cursor account default. |
+| **Model** | **Selectable** via the `model` argument (agy's `--model`, e.g. `"gemini-3.1-pro-high"`, `"claude-sonnet-4-6"`); omit to use the `"model"` field in agy's `settings.json` (**`gemini-3.6-flash-high`** by default as of 1.1.6). **agy 1.1.5 replaced the old human labels with these slugs** — the old `"Gemini 3.1 Pro (High)"` form no longer works. Switching model in `-p` used to hang (through ~1.0.14) but is **fixed as of 1.0.16**. An unknown model was silently ignored through 1.1.1 and hard-fails in `-p` as of **1.1.2**; either way the bridge validates it against `agy models` and rejects a typo up front. Flash High is speed-optimized for cheap tool-calling; pick a bigger model for heavier work. | **Selectable** via the `model` argument (codex's `-m`). codex does not hang on a switch, so model choice is a first-class knob. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.3-codex`, `claude-sonnet-4.6`, `auto`); omit for your account default. An unavailable model errors immediately. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.2`, `claude-4-sonnet-thinking`, `auto`, or parameterized ids like `claude-opus-4-8[context=1m]`); a wide GPT/Claude/Grok/Composer menu, validated against `cursor-agent models` (a typo is rejected up front). Omit for your Cursor account default. |
 | **Auth** | Piggybacks whatever credential store `agy` uses on your OS (Windows Credential Manager, macOS Keychain, libsecret on Linux — the bridge never touches it directly). Log in once; every call silent-auths on the **same AI Pro quota** you already pay for. | Uses your existing **Codex login** — ChatGPT account or API key. Run `codex login` once; verify with `codex_status`. | Uses your existing **Copilot login** — run `copilot` then `/login` once (OS credential store), or set `COPILOT_GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN`. Verify with `copilot_status`. | Uses your existing **Cursor login** — run `cursor-agent login` once (OS credential store), or set `CURSOR_API_KEY`. Verify with `cursor_status`. |
 
 <a id="security"></a>
@@ -778,6 +778,41 @@ at 3 workers). That's the supported way to run many calls at once, across any ba
 
 ## Status & caveats
 
+- 🛡️ **agy 1.1.9 broke print mode for any prompt starting with a slash — fixed by
+  `--disable-slash-commands`.** 1.1.9 made `-p` **expand slash commands and skills** instead of
+  sending them to the model as text, so a prompt whose first token names a registered command is
+  *executed as that command and never reaches the model*. Verified live on 1.1.10 through this
+  bridge: `antigravity_ask("/help")` came back with agy's own help page, not an answer. That is not
+  just wrong output — agy's registered set includes **side-effecting** commands (`/goal` starts an
+  autonomous long-running task, `/schedule` creates cron jobs), and bridge prompts routinely carry
+  text the caller did not author, so an untrusted string beginning `/schedule …` would have run it.
+  Every agy argv path now passes `--disable-slash-commands` (one change in `_agy_base_args` covers
+  ask, continue, both watched runners, and both swarm workers). Version-gated: the flag doesn't
+  exist before 1.1.9, and neither does the expansion. Prompts starting with a POSIX path
+  (`/etc/hosts …`) were never affected — they match no command — but that was luck, not a boundary.
+  Set **`AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1`** to keep the expansion if you *want*
+  `-p "/my-skill <args>"` to invoke a skill.
+- 🐛 **Non-ASCII answers were being mangled on Windows — fixed.** Every backend emits UTF-8, but the
+  bridge spawned them with bare `text=True`, which decodes using the **locale** codepage
+  (`locale.getpreferredencoding()` — cp1254 on a Turkish Windows, cp1252 elsewhere). Any non-ASCII
+  answer came back corrupted: `dosyası` arrived as `dosyasÄ±`, exactly
+  `'dosyası'.encode('utf-8').decode('cp1254')`. All four bridges plus the swarm workers now decode
+  UTF-8 explicitly with `errors="replace"`, the pattern `cursor_bridge.py` already used. A
+  regression test asserts no subprocess call reintroduces bare `text=True`. ASCII-only answers were
+  never affected, which is why this survived so long.
+- ✅ **Re-verified on agy 1.1.9 and 1.1.10.** Beyond the slash-command break above: 1.1.10 fixed
+  `--model`/`--effort` being **silently ignored in headless `-p`** (they were applied after model
+  configuration had already initialized, so the run fell back to the persisted/default model). The
+  bridge validates and passes `--model` on every call, so on **1.1.8–1.1.9 the `model` argument was
+  a no-op** even though a typo was still correctly rejected — if you pinned a model in that window,
+  you were served the default. Re-confirmed working on 1.1.10 through the bridge
+  (`model="claude-sonnet-4-6"` → a Claude answer, not Gemini). No code change was needed for it.
+  1.1.10 also added a non-blocking advisory banner when the same conversation is open in another CLI
+  instance — the shape `antigravity_continue` and the swarm can produce — so `_parse_json_result`
+  now **locates** the result object instead of requiring stdout to *start* with `{`; leading and
+  trailing chatter are both absorbed rather than degrading into a raw JSON blob in your answer.
+  `VERIFIED_AGY_VERSION` → `(1, 1, 10)`. Nothing else in 1.1.9/1.1.10 reaches the bridge — the rest
+  is interactive-TUI, hooks, auth, and MCP-*client* work.
 - ✅ **Verified on agy 1.1.7 and 1.1.8 — nothing broke, and 1.1.8 made the bridge sturdier.** 1.1.8
   gave print mode an `--output-format` flag (`text` | `json` | `stream-json`). The existing text path
   was confirmed live on 1.1.8 first (ask, pinned continue, and `--model` all clean), then the bridge
@@ -870,7 +905,7 @@ at 3 workers). That's the supported way to run many calls at once, across any ba
   live `copilot_ask` / `copilot_continue` round-trips + a mixed `agent_swarm` pass. (Bumped from
   1.0.68: 1.0.69 adds a `--resume` convenience flag the bridge doesn't need; `--session-id` still
   both *sets* a fresh id and resumes it — re-verified live, ACK then codeword recall.)
-- ✅ **Verified on cursor-agent 2026.07.08** — `cursor-agent -p --output-format text --trust` (clean
+- ✅ **Verified on cursor-agent 2026.07.23** — `cursor-agent -p --output-format text --trust` (clean
   stdout answer), `create-chat` + `-p --resume <id>`, `--model` (validated against `cursor-agent
   models`), `--output-format stream-json` (watch stream), and the
   `~/.cursor/chats/<md5(workspace)>/<chat-id>/meta.json` layout the continue fallback reads are all in
@@ -902,10 +937,10 @@ at 3 workers). That's the supported way to run many calls at once, across any ba
 ## Requirements
 
 - Python 3.10+
-- **For the Antigravity tools:** [`agy`](https://antigravity.google/) 1.0.0+ on `PATH` (state-file layout re-verified on **1.0.15**) and an active Antigravity / AI Pro session
+- **For the Antigravity tools:** [`agy`](https://antigravity.google/) 1.0.0+ on `PATH` (state-file layout re-verified on **1.0.15**; behaviour re-verified on **1.1.10**) and an active Antigravity / AI Pro session
 - **For the Codex tools:** [`codex`](https://developers.openai.com/codex/) on `PATH` and logged in (`codex login`) — verified on **codex-cli 0.144.1**
 - **For the Copilot tools:** [`copilot`](https://docs.github.com/en/copilot/how-tos/copilot-cli) on `PATH` and logged in (`copilot` → `/login`, or a `COPILOT_GITHUB_TOKEN`/`GH_TOKEN` env) — verified on **copilot 1.0.69**
-- **For the Cursor tools:** [`cursor-agent`](https://cursor.com/cli) on `PATH` and logged in (`cursor-agent login`, or a `CURSOR_API_KEY` env) — verified on **cursor-agent 2026.07.08**
+- **For the Cursor tools:** [`cursor-agent`](https://cursor.com/cli) on `PATH` and logged in (`cursor-agent login`, or a `CURSOR_API_KEY` env) — verified on **cursor-agent 2026.07.23**
 
 Each backend is independent — install only the CLI(s) you plan to use; the other tools simply report "not found" via their `*_status` tool.
 

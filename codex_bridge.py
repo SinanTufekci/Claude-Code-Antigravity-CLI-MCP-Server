@@ -69,6 +69,11 @@ _UUID_RE = re.compile(
 # prints "\x1b[31;1mLogged in using ChatGPT\x1b[0m").
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
+# Text decoding for codex's subprocesses: it emits UTF-8, which bare text=True
+# would decode with the Windows locale codepage (cp1254/cp1252) and mangle on any
+# non-ASCII answer. Decode UTF-8 explicitly and never raise on a stray byte.
+_TEXT = {"encoding": "utf-8", "errors": "replace"}
+
 # Poll window for the rollout file to appear after codex exits. codex has already
 # returned by the time we look, so this usually resolves at once; the poll just
 # absorbs filesystem-flush lag (mirrors server.py's response poll).
@@ -350,7 +355,7 @@ def run_codex(
             cwd=workspace,
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            **_TEXT,
             timeout=timeout_s + 30,
             **_spawn_kwargs(),
         )
@@ -419,7 +424,7 @@ def run_codex_streaming(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            **_TEXT,
             **_spawn_kwargs(),
         )
         # Drive completion off PROCESS EXIT, not stdout EOF: codex (node) can leave a
@@ -502,7 +507,7 @@ def codex_version() -> Optional[str]:
             [CODEX_BIN, "--version"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            **_TEXT,
             timeout=15,
             **_spawn_kwargs(),
         )
@@ -523,7 +528,7 @@ def codex_login_status() -> tuple[bool, str]:
             [CODEX_BIN, "login", "status"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            **_TEXT,
             timeout=15,
             **_spawn_kwargs(),
         )

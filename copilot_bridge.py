@@ -107,6 +107,11 @@ _BUILTIN_GITHUB_MCP = os.environ.get("COPILOT_GITHUB_MCP", "").strip().lower() i
 
 # A session id is a UUID; it names the session-state dir and appears as `id:` in
 # that dir's workspace.yaml.
+# Text decoding for copilot's subprocesses: it emits UTF-8, which bare text=True
+# would decode with the Windows locale codepage (cp1254/cp1252) and mangle on any
+# non-ASCII answer. Decode UTF-8 explicitly and never raise on a stray byte.
+_TEXT = {"encoding": "utf-8", "errors": "replace"}
+
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -358,7 +363,7 @@ def run_copilot(
         cwd=workspace,
         stdin=subprocess.DEVNULL,
         capture_output=True,
-        text=True,
+        **_TEXT,
         timeout=timeout_s + 30,
         **_spawn_kwargs(),
     )
@@ -431,7 +436,7 @@ def run_copilot_streaming(
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        **_TEXT,
         **_spawn_kwargs(),
     )
     # Drive completion off PROCESS EXIT, not stdout EOF: like codex, the CLI can
@@ -508,7 +513,7 @@ def copilot_version() -> Optional[str]:
             [COPILOT_BIN, "--version"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            **_TEXT,
             timeout=15,
             **_spawn_kwargs(),
         )

@@ -14,10 +14,15 @@ import os
 import sqlite3
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
+import codex_bridge
+import copilot_bridge
+import cursor_bridge
 import server
+import swarm
 
 # --------------------------------------------------------------------------
 # _normalize_workspace
@@ -592,7 +597,104 @@ def test_build_agy_args_skip_permissions_precedes_prompt(model):
     """
     args, _ = server._build_agy_args("hi", "C:\\ws", continue_conv=False, timeout_s=10, model=model)
     assert args.index("--dangerously-skip-permissions") < args.index("-p")
+
+
+# --------------------------------------------------------------------------
+# --disable-slash-commands: required as of agy 1.1.9 (print-mode slash/skill
+# expansion would otherwise EXECUTE a prompt instead of answering it)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "version_out,expected",
+    [
+        ("1.1.9", True),
+        ("1.1.10", True),
+        ("1.2.0", True),
+        ("2.0.0", True),
+        ("1.1.8", False),  # expansion doesn't exist yet AND the flag isn't parsed
+        ("1.1.3", False),
+        ("1.0.15", False),
+        ("", False),  # unparseable -> never pass a flag we can't confirm exists
+        ("not a version", False),
+    ],
+)
+def test_supports_disable_slash_commands_version_gate(monkeypatch, version_out, expected):
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", None)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: version_out)
+    assert server.supports_disable_slash_commands() is expected
+
+
+def test_supports_disable_slash_commands_is_cached(monkeypatch):
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", None)
+    calls = {"n": 0}
+
+    def counted():
+        calls["n"] += 1
+        return "1.1.10"
+
+    monkeypatch.setattr(server, "_get_agy_version", counted)
+    assert server.supports_disable_slash_commands() is True
+    assert server.supports_disable_slash_commands() is True
+    assert calls["n"] == 1  # version probed once per process
+
+
+def test_supports_disable_slash_commands_false_when_agy_missing(monkeypatch):
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", None)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: None)
+    assert server.supports_disable_slash_commands() is False
+
+
+def test_agy_base_args_disables_slash_commands(monkeypatch):
+    """agy 1.1.9 made print mode EXPAND slash commands and skills, so a prompt whose
+    first token names one is executed as that command and never reaches the model —
+    verified live on 1.1.10: antigravity_ask("/help") returned agy's help page.
+    Registered commands include side-effecting ones (`/goal`, `/schedule`), so this
+    is a correctness AND a safety fix.
+    """
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
+    assert "--disable-slash-commands" in server._agy_base_args(10)
+
+
+def test_agy_base_args_omits_slash_flag_on_older_agy(monkeypatch):
+    """Pre-1.1.9 agy has no such flag in its parser — passing it would break every
+    call, and the expansion it guards against doesn't exist there anyway.
+    """
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", False)
+    assert "--disable-slash-commands" not in server._agy_base_args(10)
+
+
+def test_agy_base_args_slash_flag_opt_out_via_env(monkeypatch):
+    """AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1 is the deliberate opt-in for callers who
+    WANT `-p "/my-skill <args>"` to invoke a skill.
+    """
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
+    monkeypatch.setenv("AGY_BRIDGE_ALLOW_SLASH_COMMANDS", "1")
+    assert "--disable-slash-commands" not in server._agy_base_args(10)
+
+
+@pytest.mark.parametrize("model", [None, "gemini-3.1-pro-high"])
+def test_build_agy_args_slash_flag_precedes_prompt(monkeypatch, model):
+    """Same -p rule as --dangerously-skip-permissions: agy's -p takes the prompt as
+    its VALUE, so any flag landing after it would be swallowed as the prompt.
+    """
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
+    args, _ = server._build_agy_args("hi", "C:\\ws", continue_conv=False, timeout_s=10, model=model)
+    assert args.index("--disable-slash-commands") < args.index("-p")
     assert args[-2:] == ["-p", "hi"]
+
+
+def test_run_agy_passes_slash_guard(fake_agy_slash, brain_dir, last_conv_file):
+    """End-to-end through _run_agy: the guard reaches the real argv, not just
+    _agy_base_args in isolation.
+    """
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_slash["stdout"] = "answer"
+    server._run_agy("/help", "C:\\ws", continue_conv=False, timeout_s=10)
+    argv = fake_agy_slash["args"]
+    assert "--disable-slash-commands" in argv
+    # the slash-prefixed prompt still reaches agy verbatim — guarded, not rewritten
+    assert argv[-2:] == ["-p", "/help"]
 
 
 # --------------------------------------------------------------------------
@@ -829,6 +931,11 @@ def fake_agy(monkeypatch, brain_dir, last_conv_file):
     these tests exercise the plain-text stdout path deterministically, regardless
     of what agy is installed on the machine running the suite. The json path has
     its own fixture (fake_agy_json).
+
+    The slash-command gate is pinned OFF for the same reason: it is a process-wide
+    cache resolved from the REAL `agy --version`, so without pinning, argv
+    assertions here would depend on whether the machine running the suite has agy
+    1.1.9+ installed (CI has no agy at all). fake_agy_slash turns it on.
     """
     cap = {"args": None, "kwargs": None, "returncode": 0, "stdout": "", "stderr": ""}
 
@@ -843,6 +950,7 @@ def fake_agy(monkeypatch, brain_dir, last_conv_file):
     monkeypatch.setattr(server.time, "sleep", lambda *a, **k: None)
     monkeypatch.setattr(server, "_RESPONSE_POLL_DEADLINE_S", 0.0)
     monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", False)
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", False)
     return cap
 
 
@@ -850,6 +958,13 @@ def fake_agy(monkeypatch, brain_dir, last_conv_file):
 def fake_agy_json(fake_agy, monkeypatch):
     """fake_agy with agy 1.1.8+ structured output ENABLED (--output-format json)."""
     monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", True)
+    return fake_agy
+
+
+@pytest.fixture
+def fake_agy_slash(fake_agy, monkeypatch):
+    """fake_agy with agy 1.1.9+ slash-command expansion — so the guard flag is ON."""
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
     return fake_agy
 
 
@@ -1026,6 +1141,103 @@ def test_parse_json_result_tolerates_surrounding_whitespace():
 )
 def test_parse_json_result_returns_none_for_non_results(stdout):
     assert server._parse_json_result(stdout) is None
+
+
+# --------------------------------------------------------------------------
+# _parse_json_result banner tolerance (agy 1.1.10 advisory banners)
+# --------------------------------------------------------------------------
+
+_BANNER = (
+    "This conversation is already open in another CLI instance on this machine.\n"
+    "Use /fork to work on a copy instead.\n"
+)
+
+
+def test_parse_json_result_tolerates_leading_banner():
+    """agy 1.1.10 prints a non-blocking advisory when the same conversation is open
+    elsewhere — exactly what *_continue and the swarm can trigger. A strict
+    startswith("{") test would miss the object and hand the user a raw JSON blob.
+    """
+    out = server._parse_json_result(_BANNER + _json_result(response="hello"))
+    assert out["response"] == "hello"
+
+
+def test_parse_json_result_tolerates_trailing_chatter():
+    out = server._parse_json_result(_json_result(response="hello") + "\n" + _BANNER)
+    assert out["response"] == "hello"
+
+
+def test_parse_json_result_tolerates_banner_on_both_sides():
+    out = server._parse_json_result(_BANNER + _json_result(response="hello") + _BANNER)
+    assert out["response"] == "hello"
+
+
+def test_parse_json_result_skips_non_result_objects_before_the_result():
+    """A leading JSON object that isn't the result (no `response`) must not stop the
+    scan — keep looking for the real one.
+    """
+    out = server._parse_json_result('{"note": "heads up"}\n' + _json_result(response="hello"))
+    assert out["response"] == "hello"
+
+
+def test_parse_json_result_ignores_braces_in_a_plain_text_answer():
+    """Prose containing braces is still not a result object."""
+    assert server._parse_json_result("the config is {a: 1} roughly") is None
+
+
+# --------------------------------------------------------------------------
+# UTF-8 decoding of backend stdout (locale codepage mangles non-ASCII)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "module",
+    [server, codex_bridge, copilot_bridge, cursor_bridge, swarm],
+    ids=["server", "codex", "copilot", "cursor", "swarm"],
+)
+def test_bridges_decode_subprocess_output_as_utf8(module):
+    """Every module that spawns a backend must decode its stdout as UTF-8.
+
+    Bare text=True decodes with locale.getpreferredencoding() — cp1254 on a Turkish
+    Windows, cp1252 elsewhere — which silently mangles every non-ASCII answer:
+    "dosyası" came back from antigravity_ask as "dosyasÄ±", exactly
+    'dosyası'.encode('utf-8').decode('cp1254').
+    """
+    assert module._TEXT == {"encoding": "utf-8", "errors": "replace"}
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["server.py", "codex_bridge.py", "copilot_bridge.py", "cursor_bridge.py", "swarm.py"],
+)
+def test_no_subprocess_call_uses_bare_text_true(path):
+    """Regression guard for the mojibake bug: a new subprocess call must spread
+    **_TEXT, never `text=True` (which silently picks the locale codepage). Matched
+    with the trailing comma so the prose in the _TEXT comments doesn't trip it.
+    """
+    source = (Path(__file__).parent / path).read_text(encoding="utf-8")
+    assert "text=True," not in source
+
+
+def test_run_agy_decodes_stdout_as_utf8(fake_agy, brain_dir, last_conv_file):
+    """The kwargs actually handed to subprocess.run, not just the constant."""
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy["stdout"] = "answer"
+    server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert fake_agy["kwargs"]["encoding"] == "utf-8"
+    assert fake_agy["kwargs"]["errors"] == "replace"
+
+
+def test_utf8_decoding_survives_the_turkish_roundtrip(fake_agy, brain_dir, last_conv_file):
+    """The real-world symptom: a Turkish answer must come back intact, not as the
+    cp1254 mis-decode that shipped before this fix.
+    """
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    answer = "dosyası açıklaması şudur"
+    fake_agy["stdout"] = answer
+    out = server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert out == answer
+    assert "Ä" not in out
 
 
 @pytest.mark.parametrize("fmt", ["json", "stream-json"])

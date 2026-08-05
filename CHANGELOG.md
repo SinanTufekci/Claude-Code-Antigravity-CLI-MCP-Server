@@ -10,6 +10,75 @@ summary.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-05
+
+agy **1.1.9 silently broke print mode** for a whole class of prompt, and a
+long-standing decoding bug meant **every non-ASCII answer came back mangled on Windows**. Both are
+fixed here. Re-verified against agy 1.1.10 and cursor-agent 2026.07.23; codex 0.144.1 and copilot
+1.0.69 are unchanged and still correct.
+
+### Fixed
+
+- **agy 1.1.9 executed slash-prefixed prompts instead of answering them.** 1.1.9 made `-p` expand
+  slash commands and skills rather than passing them to the model as literal text. A prompt whose
+  **first token** names a registered command was therefore run as that command and never reached the
+  model. Verified live on 1.1.10 through the bridge: `antigravity_ask("/help")` returned agy's own
+  help page. This was more than wrong output — agy's registered set includes **side-effecting**
+  commands (`/goal` launches an autonomous long-running task, `/schedule` creates cron jobs), and
+  bridge prompts routinely carry text the caller did not author, so an untrusted string beginning
+  `/schedule …` would have run it. `_agy_base_args` now appends `--disable-slash-commands`, which
+  covers **all six agy argv paths** at once (ask, continue, both watched runners, both swarm
+  workers) since they all build on it. Version-gated at 1.1.9 via `supports_disable_slash_commands()`
+  — the flag is absent from older parsers, and so is the expansion — mirroring the existing
+  `supports_json_output()` 1.1.8 gate. Prompts starting with a POSIX path (`/etc/hosts …`) were never
+  affected, matching no command, but that was luck rather than a boundary.
+  **`AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1`** opts back in for callers who *want*
+  `-p "/my-skill <args>"` to invoke a skill.
+- **Non-ASCII answers were corrupted on any non-UTF-8 locale (Windows).** The backends emit UTF-8,
+  but the bridge spawned them with bare `text=True`, which decodes with
+  `locale.getpreferredencoding()` — cp1254 on a Turkish Windows, cp1252 elsewhere. Every non-ASCII
+  answer came back mojibake: `dosyası` arrived as `dosyasÄ±`, exactly
+  `'dosyası'.encode('utf-8').decode('cp1254')`. `server.py` (5 call sites), `codex_bridge.py` (4),
+  `copilot_bridge.py` (3) and `swarm.py` (4) now spread a `_TEXT` dict of
+  `{"encoding": "utf-8", "errors": "replace"}` — the pattern `cursor_bridge.py` already had and the
+  other four modules never picked up. `errors="replace"` keeps a stray byte from raising mid-answer.
+  A regression test asserts no module reintroduces bare `text=True` in a subprocess call. ASCII-only
+  answers were unaffected, which is why this went unnoticed for so long.
+- **A leading or trailing banner made the bridge return a raw JSON blob.** `_parse_json_result`
+  required stdout to *start* with `{`, so any surrounding chatter dropped the run onto the plain-text
+  fallback and handed the caller the whole serialized result object as their "answer". agy 1.1.10
+  started printing exactly such a banner — a non-blocking advisory when the same conversation is
+  already open in another CLI instance, precisely what `antigravity_continue` and the swarm can
+  trigger. The parser now **locates** the first decodable object carrying the contractual `response`
+  key, absorbing leading and trailing text. Plain text still answers `None` and still falls back
+  unchanged.
+
+### Changed
+
+- **`VERIFIED_AGY_VERSION` → `(1, 1, 10)`**, so `antigravity_status` stops reporting "newer than
+  verified". 1.1.10 fixed `--model`/`--effort` being **silently ignored in headless `-p`** (applied
+  after model configuration had already initialized, so the run fell back to the persisted/default
+  model) — meaning on **1.1.8–1.1.9 the bridge's `model` argument was a no-op**, even though a typo
+  was still correctly rejected up front by `validate_model`. Anyone who pinned a model in that window
+  was served the default instead. Re-confirmed working on 1.1.10 through the bridge
+  (`model="claude-sonnet-4-6"` returned a Claude answer, not Gemini). No bridge change was required.
+  Nothing else in 1.1.9/1.1.10 reaches the bridge — the remainder is interactive-TUI, hooks, auth,
+  and MCP-*client* work.
+- **`cursor_bridge.py` dropped its redundant `text=True`.** Every cursor subprocess already spread
+  `_TEXT`, so `text=True` alongside it was a no-op (`encoding` implies text mode). Removing it makes
+  the "never bare `text=True`" rule uniform across all five modules and therefore testable.
+
+### Docs
+
+- **Re-verified cursor-agent at 2026.07.23** (badge, requirements, and the Cursor bridge section had
+  all still said 2026.07.08, even though `cursor_bridge.py`'s own docstring was bumped in 0.22.1).
+  The live menu is now **197 ids**; the README's `sonnet-4-thinking` example is retired and replaced
+  with the live `claude-4-sonnet-thinking`. New families the docs hadn't caught up with: Opus 5,
+  GPT-5.6 Sol/Terra/Luna, Kimi K3, GLM 5.2. The bridge validates against `cursor-agent models` live,
+  so this was documentation rot only — but every rotted example is a guaranteed rejected call.
+- agy badge → 1.1.10, and the requirements line now records the behaviour re-verification separately
+  from the 1.0.15 state-file layout check.
+
 ## [0.22.1] - 2026-07-28
 
 Swept the other three CLIs after the agy work. **codex and copilot needed no code
@@ -807,7 +876,8 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.1...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.0...v0.22.1
 [0.22.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.4...v0.22.0
 [0.21.4]: https://github.com/SinanTufekci/agent-intern/compare/v0.21.3...v0.21.4

@@ -32,6 +32,11 @@ from typing import Optional, Union
 DEFAULT_MAX_CONCURRENCY = 4
 _REAL_SETTINGS = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
 
+# Text decoding for the swarm workers' subprocesses: the backends emit UTF-8,
+# which bare text=True would decode with the Windows locale codepage
+# (cp1254/cp1252) and mangle on any non-ASCII answer. Mirrors server._TEXT.
+_TEXT = {"encoding": "utf-8", "errors": "replace"}
+
 
 # ----------------------------------------------------------------------------- isolation
 def _make_isolated_home() -> Path:
@@ -202,7 +207,7 @@ def _run_text_worker(index, prompt, workspace, model, timeout_s) -> WorkerResult
             stdin=subprocess.DEVNULL,
             env=_env_for_home(home),
             capture_output=True,
-            text=True,
+            **_TEXT,
             timeout=timeout_s + 30,
             **server._spawn_kwargs(),
         )
@@ -261,7 +266,7 @@ def _run_text_worker_watched(index, prompt, workspace, model, timeout_s) -> Work
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            **_TEXT,
             env=_env_for_home(home),
             **server._spawn_kwargs(),
         )
@@ -367,7 +372,7 @@ def _run_image_worker(index, prompt, target, workspace, timeout_s) -> WorkerResu
             stdin=subprocess.DEVNULL,
             env=_env_for_home(home),
             capture_output=True,
-            text=True,
+            **_TEXT,
             timeout=timeout_s + 30,
             **server._spawn_kwargs(),
         )
@@ -417,7 +422,7 @@ def _run_image_worker_watched(index, prompt, target, workspace, timeout_s) -> Wo
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            **_TEXT,
             env=_env_for_home(home),
             **server._spawn_kwargs(),
         )

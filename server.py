@@ -397,7 +397,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.22.1"
+__version__ = "0.23.0"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -429,12 +429,18 @@ _AGY_LOCK = threading.Lock()
 # Latest agy version the bridge's state-file assumptions were verified against.
 # Newer agy releases may change paths/schemas (the SQLite migration is the known
 # risk), so we warn at startup if the installed agy is newer than this.
-VERIFIED_AGY_VERSION = (1, 1, 8)
+VERIFIED_AGY_VERSION = (1, 1, 10)
 
 # First agy version whose print mode understands `--output-format json` (1.1.8).
 # Below this the flag is unknown to agy's parser, so the bridge must not pass it
 # and stays on the plain-text stdout path. See supports_json_output.
 JSON_OUTPUT_MIN_VERSION = (1, 1, 8)
+
+# First agy version whose print mode EXPANDS slash commands and skills instead of
+# sending them to the model as literal text (1.1.9), and whose parser therefore
+# understands the `--disable-slash-commands` opt-out. See
+# supports_disable_slash_commands and _agy_base_args.
+SLASH_COMMANDS_MIN_VERSION = (1, 1, 9)
 
 # Poll window for the transcript/conversation-id to appear after agy exits.
 # agy has already returned 0 by the time we read, so the common case resolves
@@ -534,6 +540,15 @@ def _update_warning(latest: Optional[tuple[int, int, int]]) -> Optional[str]:
         f"(you are running v{__version__}). Update with `git pull` in the repo, "
         "then restart Claude Code. Set AGY_BRIDGE_NO_UPDATE_CHECK=1 to silence this."
     )
+
+
+# Text decoding for every CLI subprocess. The backends emit UTF-8, but bare
+# text=True decodes with the LOCALE codepage (locale.getpreferredencoding) — cp1254
+# on a Turkish Windows, cp1252 elsewhere — which silently mangles every non-ASCII
+# answer: "dosyası" came back as "dosyasÄ±" through antigravity_ask, exactly
+# 'dosyası'.encode('utf-8').decode('cp1254'). Decode UTF-8 explicitly and never
+# raise on a stray byte. Mirrors cursor_bridge._TEXT, which already got this right.
+_TEXT = {"encoding": "utf-8", "errors": "replace"}
 
 
 def _spawn_kwargs(name: str = "") -> dict:
@@ -636,7 +651,7 @@ def _get_agy_version() -> Optional[str]:
             [AGY_BIN, "--version"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            **_TEXT,
             timeout=15,
             **_spawn_kwargs(),
         )
@@ -1190,6 +1205,29 @@ def supports_json_output() -> bool:
         return _AGY_JSON_SUPPORT
 
 
+# Whether the installed agy understands `--disable-slash-commands`. Resolved once
+# per process and cached, exactly like _AGY_JSON_SUPPORT.
+_AGY_SLASH_GATE: Optional[bool] = None
+_AGY_SLASH_GATE_LOCK = threading.Lock()
+
+
+def supports_disable_slash_commands() -> bool:
+    """True if this agy has the `--disable-slash-commands` opt-out (1.1.9+).
+
+    agy 1.1.9 made print mode expand slash commands and skills, so a prompt whose
+    first token names one is EXECUTED as that command instead of reaching the
+    model. Below 1.1.9 the flag is not in agy's parser (and the expansion doesn't
+    happen), so it must not be passed. An unparseable/missing version answers
+    False — never pass a flag we can't confirm exists. Cached for the process.
+    """
+    global _AGY_SLASH_GATE
+    with _AGY_SLASH_GATE_LOCK:
+        if _AGY_SLASH_GATE is None:
+            version = _parse_agy_version(_get_agy_version() or "")
+            _AGY_SLASH_GATE = version is not None and version >= SLASH_COMMANDS_MIN_VERSION
+        return _AGY_SLASH_GATE
+
+
 def _parse_json_result(stdout: str) -> Optional[dict]:
     """agy's `--output-format json` result object, or None if stdout isn't one.
 
@@ -1201,17 +1239,29 @@ def _parse_json_result(stdout: str) -> Optional[dict]:
     ignores the flag: verified on 1.1.8 that an unrecognised --output-format VALUE
     is dropped without error and prints plain text, so a bad/removed format must
     never surface as a crash.
+
+    BANNER TOLERANCE: the object is located rather than assumed to be the whole of
+    stdout. agy 1.1.10 started printing a non-blocking advisory banner when the
+    same conversation is already open in another CLI instance — precisely the
+    shape *_continue and the swarm can produce. A banner prefixed to (or appended
+    after) the result would fail a strict startswith("{") test, and the caller's
+    fallback would then hand the user a raw JSON blob instead of an answer. We
+    scan for the first "{" that decodes to a result object, so leading and
+    trailing chatter are both absorbed. Plain text still answers None: the scan
+    requires a decodable object carrying the contractual `response` key.
     """
     text = (stdout or "").strip()
-    if not text.startswith("{"):
-        return None
-    try:
-        obj = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(obj, dict) or "response" not in obj:
-        return None
-    return obj
+    decoder = json.JSONDecoder()
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict) and "response" in obj:
+            return obj
+        start = text.find("{", start + 1)
+    return None
 
 
 # workspace -> conversation id, recorded from agy's own `--output-format json`
@@ -1281,7 +1331,7 @@ def list_agy_models() -> list[str]:
                 [AGY_BIN, "models"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
-                text=True,
+                **_TEXT,
                 timeout=20,
                 **_spawn_kwargs(),
             )
@@ -1329,8 +1379,27 @@ def _agy_base_args(timeout_s: int) -> list[str]:
     as its VALUE, so `-p --dangerously-skip-permissions <task>` parses the flag as
     the prompt and silently drops <task> (verified on 1.1.3 — agy replied with a
     description of the flag). Every caller appends `-p` LAST for this reason.
+
+    --disable-slash-commands is REQUIRED as of agy 1.1.9, which made print mode
+    expand slash commands and skills instead of passing them to the model as text.
+    A prompt whose FIRST token names a registered command is then executed as that
+    command and never reaches the model — verified live on 1.1.10 through this
+    bridge: antigravity_ask("/help") returned agy's own help page, not an answer.
+    That is not merely wrong output: agy's registered set includes side-effecting
+    commands (`/goal` starts an autonomous long-running task, `/schedule` creates
+    cron jobs), and bridge prompts routinely carry text the caller did not author,
+    so an untrusted string starting with "/schedule ..." would run it. Prompts
+    beginning with a POSIX path ("/etc/hosts …") are unaffected — they match no
+    command — but that is luck, not a boundary. Version-gated because the flag
+    does not exist before 1.1.9 (see supports_disable_slash_commands).
+
+    Set AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1 to keep agy's expansion — the deliberate
+    opt-in for callers who WANT `-p "/my-skill <args>"` to invoke a skill.
     """
-    return [AGY_BIN, "--print-timeout", f"{timeout_s}s", "--dangerously-skip-permissions"]
+    args = [AGY_BIN, "--print-timeout", f"{timeout_s}s", "--dangerously-skip-permissions"]
+    if supports_disable_slash_commands() and not _env_truthy("AGY_BRIDGE_ALLOW_SLASH_COMMANDS"):
+        args.append("--disable-slash-commands")
+    return args
 
 
 def _build_agy_args(
@@ -1414,7 +1483,7 @@ def _run_agy(
             cwd=workspace,
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            **_TEXT,
             timeout=timeout_s + 30,
             **_spawn_kwargs(),  # keep agy's TTY writes out of the host terminal
         )
@@ -2361,7 +2430,7 @@ def _run_agy_watched(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            **_TEXT,
             bufsize=1,  # line-buffered: stream-json events are consumed as they land
             **_spawn_kwargs(),  # agy stays headless; the browser is the viewer
         )
@@ -2483,7 +2552,7 @@ def _run_agy_image_watched(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            **_TEXT,
             bufsize=1,  # line-buffered: stream-json events are consumed as they land
             **_spawn_kwargs(),
         )
