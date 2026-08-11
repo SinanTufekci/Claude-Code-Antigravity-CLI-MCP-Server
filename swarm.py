@@ -3,10 +3,35 @@
 Each worker runs in its OWN isolated HOME/USERPROFILE temp dir, so agy's
 per-process state (brain/, cache/, last_conversations.json) never collides. This
 is why the single-agent path in server.py must serialize via _AGY_LOCK, but the
-swarm does NOT need the lock: isolated state means no race. Auth still works
-because agy reads it from the OS credential store, not from ~/.gemini (verified on
-agy 1.0.9 / Windows). cwd is set to each worker's real workspace, so file access
-there is unchanged; HOME redirection isolates state only.
+swarm does NOT need the lock: isolated state means no race. cwd is set to each
+worker's real workspace, so file access there is unchanged; HOME redirection
+isolates state only.
+
+AUTH IS NOT ALWAYS HOME-INDEPENDENT — the assumption this module shipped with
+("agy reads auth from the OS credential store, not ~/.gemini") was verified on
+Windows and is FALSE on macOS. Windows Credential Manager is per-user and
+unaffected by $HOME, so an isolated worker still authenticates (re-verified on agy
+1.1.12: `agy models` inside a fake HOME returns the full list). On macOS the login
+keychain is resolved through $HOME, so a redirected HOME hides the stored
+credentials, agy falls back to starting a fresh OAuth flow, and every antigravity
+worker dies at the 60 s "authentication timed out" while the non-swarm tools --
+which never touch HOME -- keep working. Reported as issue #2 (macOS 15 arm64, agy
+1.1.11); reproduced by inspection, not on a Mac.
+
+So isolation is now CONDITIONAL, decided by isolation_ok() two ways:
+
+* proactively, by probing once per process (`agy -p "/usage"` inside a throwaway
+  isolated HOME -- free on agy 1.1.11+, but real auth is required to answer it),
+  and
+* reactively, because a probe is a proxy and this one cannot be tested on the
+  platform it exists for: any worker that fails with an authentication signature
+  flips the process to serialized mode and RETRIES itself there, so the user gets
+  an answer even if the probe was wrong or unavailable.
+
+In serialized mode the antigravity workers run through server._run_agy in the
+user's real HOME under _AGY_LOCK -- correct everywhere, at the cost of the
+parallelism this module exists for (other backends are unaffected and stay
+parallel). Set AGY_BRIDGE_NO_HOME_ISOLATION=1 to force it without a probe.
 
 SECURITY: a swarm runs N unsandboxed agy agents at once — N times the
 prompt-injection "lethal trifecta" surface described in server.py's module
@@ -23,6 +48,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -61,6 +87,134 @@ def _env_for_home(home: Path) -> dict:
         env["HOMEDRIVE"] = drive + ":"
         env["HOMEPATH"] = rest or "\\"
     return env
+
+
+# Signatures of agy hitting its interactive sign-in flow instead of stored
+# credentials. Matched against a FAILED worker's error text (agy's stderr tail),
+# never against an answer, so a prompt that merely discusses logins can't trip it.
+# From issue #2's report: "...&state=... / Waiting for authentication (timeout
+# 60s)... / Or, paste the authorization code here and press Enter: / Error:
+# authentication timed out."
+_AUTH_FAILURE_MARKERS = (
+    "authentication timed out",
+    "waiting for authentication",
+    "paste the authorization code",
+    "not authenticated",
+    "please sign in",
+)
+
+# Whether a worker in an isolated HOME can still see agy's stored auth. None until
+# resolved; then cached for the process (a probe result, or a worker's own
+# authentication failure). See the module docstring.
+_ISOLATION_OK: Optional[bool] = None
+_ISOLATION_LOCK = threading.Lock()
+
+
+def _looks_like_auth_failure(text: Optional[str]) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _AUTH_FAILURE_MARKERS)
+
+
+def _credential_store_follows_home() -> bool:
+    """Can redirecting HOME hide agy's stored credentials on this platform?
+
+    False on Windows: Credential Manager is keyed to the user session, not to a
+    path, so an isolated worker still authenticates — verified live on agy 1.1.12
+    that `agy models` inside a fake HOME returns the full list. True elsewhere,
+    because macOS resolves the login keychain through $HOME (issue #2) and the
+    bridge has no evidence either way for Linux's keyring. Its own function so the
+    probe's platform rule is testable without patching os.name, which would also
+    re-point pathlib at the wrong flavour.
+    """
+    return os.name != "nt"
+
+
+def _probe_isolated_auth() -> Optional[bool]:
+    """Can agy authenticate inside an isolated HOME? None = couldn't tell.
+
+    The probe is `agy -p "/usage"` in a throwaway isolated HOME: on agy 1.1.11+ the
+    CLI answers it itself (no agent turn, no quota, no conversation left behind)
+    but the quota table comes from the account, so it cannot be answered without
+    working credentials — which is exactly the property we need to test. Below
+    1.1.11 there is no free way to ask, hence None.
+
+    Only DEFINITE answers are returned. A timeout means agy sat in its 60 s
+    interactive sign-in wait until we killed it (the issue #2 symptom), and an
+    auth signature in its output says the same in words; both are False. A parsed
+    quota table is True. Anything else — a network blip, an unexpected non-zero
+    exit — is None rather than False: the reactive fallback catches a real auth
+    failure anyway, so an ambiguous probe must not cost every user their
+    parallelism.
+
+    Skipped on Windows, where the credential store is per-user and HOME-independent
+    by design — verified live on 1.1.12 that `agy models` inside a fake HOME returns
+    the full list — so the probe would spend seconds per process to answer a
+    question that cannot fail there. If that ever changes, the reactive path covers
+    it.
+    """
+    import server
+
+    if not _credential_store_follows_home():
+        return None
+    if not server.supports_print_usage():
+        return None
+    home = _make_isolated_home()
+    try:
+        proc = subprocess.run(
+            [server.AGY_BIN, "--print-timeout", "20s", "-p", "/usage"],
+            env=_env_for_home(home),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            **_TEXT,
+            timeout=25,
+            **server._spawn_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return False  # stuck in agy's interactive sign-in wait
+    except (OSError, subprocess.SubprocessError):
+        return None
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    if _looks_like_auth_failure((proc.stderr or "") + (proc.stdout or "")):
+        return False
+    if proc.returncode != 0:
+        return None
+    return True if server._parse_usage_rows(proc.stdout or "") else None
+
+
+def isolation_ok() -> bool:
+    """Whether antigravity workers may run in isolated HOMEs (i.e. in parallel).
+
+    False routes them through the serialized fallback instead. Resolved once per
+    process: the env override, then the probe, defaulting to True when the probe
+    can't tell — the pre-existing behaviour, with the reactive fallback as the net.
+    """
+    global _ISOLATION_OK
+    import server
+
+    with _ISOLATION_LOCK:
+        if _ISOLATION_OK is None:
+            if server._env_truthy("AGY_BRIDGE_NO_HOME_ISOLATION"):
+                _ISOLATION_OK = False
+            else:
+                probed = _probe_isolated_auth()
+                _ISOLATION_OK = True if probed is None else probed
+        return _ISOLATION_OK
+
+
+def _mark_isolation_broken(reason: str) -> None:
+    """Latch serialized mode after a worker hit agy's sign-in flow."""
+    global _ISOLATION_OK
+    with _ISOLATION_LOCK:
+        if _ISOLATION_OK is not False:
+            _ISOLATION_OK = False
+            import server
+
+            server.log.warning(
+                "agy could not authenticate in an isolated HOME (%s); running "
+                "antigravity swarm workers serialized in the real HOME instead",
+                reason[:200],
+            )
 
 
 def _isolated_brain(home: Path) -> Path:
@@ -190,9 +344,38 @@ def _repos(workspaces: list[str]) -> list[str]:
 
 
 # ----------------------------------------------------------------------------- text swarm
+def _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, t0) -> WorkerResult:
+    """One antigravity worker WITHOUT HOME isolation, serialized behind _AGY_LOCK.
+
+    The fallback for a platform where isolating HOME hides agy's credentials (see
+    the module docstring). It delegates to server._run_agy, which owns the lock and
+    the conversation-resolution logic for the real state dir — the isolated
+    readers here (_only_conv, _read_isolated_response) assume a HOME holding
+    exactly one conversation and cannot work against the user's real brain dir.
+    `pin=False` keeps a worker from claiming the workspace's continue slot.
+
+    Workers run one at a time in this mode, so a swarm takes about as long as the
+    same tasks run back to back.
+    """
+    import server
+
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        ans = server._run_agy(prompt, workspace, False, timeout_s, model, pin=False)
+        return WorkerResult(
+            index, True, answer=ans, elapsed=round(time.time() - t0, 1), workspace=workspace
+        )
+    except Exception as e:  # noqa: BLE001 — error isolation: one worker must not sink the swarm
+        return WorkerResult(
+            index, False, error=str(e), elapsed=round(time.time() - t0, 1), workspace=workspace
+        )
+
+
 def _run_text_worker(index, prompt, workspace, model, timeout_s) -> WorkerResult:
     import server
 
+    if not isolation_ok():
+        return _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, time.time())
     home = _make_isolated_home()
     t0 = time.time()
     try:
@@ -239,6 +422,13 @@ def _run_text_worker(index, prompt, workspace, model, timeout_s) -> WorkerResult
                 )
             time.sleep(0.1)
     except Exception as e:  # error isolation: never propagate, return the failure
+        if _looks_like_auth_failure(str(e)):
+            # agy went to its sign-in flow because the isolated HOME hides the
+            # stored credentials. Latch serialized mode and give this worker its
+            # answer rather than reporting a failure the user can do nothing about.
+            _mark_isolation_broken(str(e))
+            shutil.rmtree(home, ignore_errors=True)
+            return _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, t0)
         return WorkerResult(
             index, False, error=str(e), elapsed=round(time.time() - t0, 1), workspace=workspace
         )
@@ -246,12 +436,58 @@ def _run_text_worker(index, prompt, workspace, model, timeout_s) -> WorkerResult
         shutil.rmtree(home, ignore_errors=True)
 
 
+def _watched_serialized_note(index: int, start: float) -> None:
+    """Tell the viewer why a serialized worker shows no live steps.
+
+    The step feed pumps the worker's ISOLATED transcript, and the fallback has no
+    isolated home to pump — the run lives in the user's real brain dir among every
+    other conversation. Rather than leave an empty panel that reads as a hung
+    worker, say what is happening; the final answer still arrives normally.
+    """
+    import swarm_watch
+
+    swarm_watch.worker_append(
+        index,
+        [
+            {
+                "kind": "narration",
+                "text": (
+                    "agy could not authenticate in an isolated HOME, so this worker "
+                    "runs serialized in the real HOME — live steps are unavailable; "
+                    "the answer will appear when it finishes."
+                ),
+                "t": round(time.time() - start, 1),
+            }
+        ],
+    )
+
+
+def _run_text_worker_watched_serialized(
+    index, prompt, workspace, model, timeout_s, start
+) -> WorkerResult:
+    """Watched worker in serialized mode: real progress state, no live step feed."""
+    import swarm_watch
+
+    _watched_serialized_note(index, start)
+    res = _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, start)
+    if res.ok:
+        swarm_watch.worker_finish(index, "done", res.answer or "", time.time() - start)
+    else:
+        swarm_watch.worker_finish(index, "error", res.error or "", time.time() - start)
+    return res
+
+
 def _run_text_worker_watched(index, prompt, workspace, model, timeout_s) -> WorkerResult:
     import server
     import swarm_watch
 
-    home = _make_isolated_home()
     start = time.time()
+    if not isolation_ok():
+        swarm_watch.worker_update(index, status="working", started=start)
+        return _run_text_worker_watched_serialized(
+            index, prompt, workspace, model, timeout_s, start
+        )
+    home = _make_isolated_home()
     swarm_watch.worker_update(index, status="working", started=start)
     feed = _Feed(home, index, start)
     try:
@@ -314,6 +550,12 @@ def _run_text_worker_watched(index, prompt, workspace, model, timeout_s) -> Work
                 )
             time.sleep(0.1)
     except Exception as e:
+        if _looks_like_auth_failure(str(e)):
+            _mark_isolation_broken(str(e))
+            shutil.rmtree(home, ignore_errors=True)
+            return _run_text_worker_watched_serialized(
+                index, prompt, workspace, model, timeout_s, start
+            )
         swarm_watch.worker_finish(index, "error", str(e), time.time() - start)
         return WorkerResult(
             index, False, error=str(e), elapsed=round(time.time() - start, 1), workspace=workspace
@@ -356,9 +598,52 @@ def _finalize_image_isolated(home: Path, target: str, agy_text: Optional[str], s
     return final_path, fmt, os.path.getsize(final_path)
 
 
+def _run_image_worker_serialized(
+    index, prompt, target, workspace, timeout_s, start
+) -> WorkerResult:
+    """One image worker WITHOUT HOME isolation, serialized behind _AGY_LOCK.
+
+    Mirrors _run_text_worker_serialized, and finalizes through server._finalize_image
+    (the real-HOME twin of _finalize_image_isolated: agy writes to the target path
+    or to the REAL scratch dir here, not to a per-worker one).
+    """
+    import server
+
+    try:
+        os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+        os.makedirs(workspace, exist_ok=True)
+        wrapped = server._wrap_image_prompt(prompt, target)
+        agy_text: Optional[str] = None
+        try:
+            agy_text = server._run_agy(wrapped, workspace, False, timeout_s, pin=False)
+        except RuntimeError:
+            # The image may exist even when the answer read failed; only report this
+            # if nothing was produced (same rule as server.antigravity_image).
+            pass
+        final_path, fmt, size = server._finalize_image(target, agy_text, start)
+        return WorkerResult(
+            index,
+            True,
+            answer=final_path,
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            image_path=final_path,
+            image_format=fmt,
+            image_size=size,
+        )
+    except Exception as e:  # noqa: BLE001 — error isolation: one worker must not sink the swarm
+        return WorkerResult(
+            index, False, error=str(e), elapsed=round(time.time() - start, 1), workspace=workspace
+        )
+
+
 def _run_image_worker(index, prompt, target, workspace, timeout_s) -> WorkerResult:
     import server
 
+    if not isolation_ok():
+        return _run_image_worker_serialized(
+            index, prompt, target, workspace, timeout_s, time.time()
+        )
     home = _make_isolated_home()
     start = time.time()
     try:
@@ -384,6 +669,11 @@ def _run_image_worker(index, prompt, target, workspace, timeout_s) -> WorkerResu
                     agy_text = _read_isolated_response(home, conv)
                 except RuntimeError:
                     pass
+        elif _looks_like_auth_failure((proc.stderr or "") + (proc.stdout or "")):
+            # Surface agy's sign-in failure as the error, so the handler below can
+            # recognize it. Otherwise this path swallows a non-zero exit and fails
+            # with "no image file produced", which hides the real cause.
+            raise RuntimeError(f"agy exited {proc.returncode}: {(proc.stderr or '')[-300:]}")
         final_path, fmt, size = _finalize_image_isolated(home, target, agy_text, start)
         return WorkerResult(
             index,
@@ -396,6 +686,10 @@ def _run_image_worker(index, prompt, target, workspace, timeout_s) -> WorkerResu
             image_size=size,
         )
     except Exception as e:
+        if _looks_like_auth_failure(str(e)):
+            _mark_isolation_broken(str(e))
+            shutil.rmtree(home, ignore_errors=True)
+            return _run_image_worker_serialized(index, prompt, target, workspace, timeout_s, start)
         return WorkerResult(
             index, False, error=str(e), elapsed=round(time.time() - start, 1), workspace=workspace
         )
@@ -403,12 +697,35 @@ def _run_image_worker(index, prompt, target, workspace, timeout_s) -> WorkerResu
         shutil.rmtree(home, ignore_errors=True)
 
 
+def _run_image_worker_watched_serialized(
+    index, prompt, target, workspace, timeout_s, start
+) -> WorkerResult:
+    """Watched image worker in serialized mode: no live step feed, same result."""
+    import swarm_watch
+
+    _watched_serialized_note(index, start)
+    res = _run_image_worker_serialized(index, prompt, target, workspace, timeout_s, start)
+    if res.ok:
+        caption = f"Saved to {res.image_path}\nformat={res.image_format} · {res.image_size} bytes"
+        swarm_watch.worker_finish(
+            index, "done", caption, time.time() - start, image=res.image_path or ""
+        )
+    else:
+        swarm_watch.worker_finish(index, "error", res.error or "", time.time() - start)
+    return res
+
+
 def _run_image_worker_watched(index, prompt, target, workspace, timeout_s) -> WorkerResult:
     import server
     import swarm_watch
 
-    home = _make_isolated_home()
     start = time.time()
+    if not isolation_ok():
+        swarm_watch.worker_update(index, status="working", started=start)
+        return _run_image_worker_watched_serialized(
+            index, prompt, target, workspace, timeout_s, start
+        )
+    home = _make_isolated_home()
     swarm_watch.worker_update(index, status="working", started=start)
     feed = _Feed(home, index, start)
     try:
@@ -429,7 +746,7 @@ def _run_image_worker_watched(index, prompt, target, workspace, timeout_s) -> Wo
         # Drain both pipes so agy can't hang on a full pipe buffer (see
         # server._drain_pipe); the image answer comes from the transcript/scratch.
         out_t, _out = server._drain_pipe(proc.stdout)
-        err_t, _err = server._drain_pipe(proc.stderr)
+        err_t, err_chunks = server._drain_pipe(proc.stderr)
         hard = start + timeout_s + 30
         while proc.poll() is None:
             if time.time() > hard:
@@ -448,6 +765,11 @@ def _run_image_worker_watched(index, prompt, target, workspace, timeout_s) -> Wo
                 agy_text = _read_isolated_response(home, conv)
             except RuntimeError:
                 pass
+        err_text = "".join(err_chunks)
+        if proc.returncode != 0 and _looks_like_auth_failure(err_text):
+            # See the non-watched twin: surface the sign-in failure instead of
+            # letting it become a misleading "no image file produced".
+            raise RuntimeError(f"agy exited {proc.returncode}: {err_text[-300:]}")
         final_path, fmt, size = _finalize_image_isolated(home, target, agy_text, start)
         caption = f"Saved to {final_path}\nformat={fmt} · {size} bytes"
         swarm_watch.worker_finish(index, "done", caption, time.time() - start, image=final_path)
@@ -462,6 +784,12 @@ def _run_image_worker_watched(index, prompt, target, workspace, timeout_s) -> Wo
             image_size=size,
         )
     except Exception as e:
+        if _looks_like_auth_failure(str(e)):
+            _mark_isolation_broken(str(e))
+            shutil.rmtree(home, ignore_errors=True)
+            return _run_image_worker_watched_serialized(
+                index, prompt, target, workspace, timeout_s, start
+            )
         swarm_watch.worker_finish(index, "error", str(e), time.time() - start)
         return WorkerResult(
             index, False, error=str(e), elapsed=round(time.time() - start, 1), workspace=workspace

@@ -737,9 +737,9 @@ call, so earlier bridge versions stayed single-model. **Re-verified on agy 1.0.1
 fixed** — a Claude model answers as Anthropic Claude, a Gemini model as Gemini, each in seconds. One
 caveat the bridge handles for you: agy **silently ignores an unknown model** (it falls back to the
 default with no error), so the bridge validates your slug against `agy models` and rejects a typo up
-front. (That validation is also what agy 1.1.12 broke, by making `agy models` print
+front. (That validation is also what agy 1.1.11 broke, by making `agy models` print
 `<slug>\t<human label>` instead of a bare slug — see [Status & caveats](#status--caveats). Fixed as
-of bridge 0.24.0; on 0.23.x with agy 1.1.12, pass no `model` at all.)
+of bridge 0.24.0; on 0.23.x with agy 1.1.11+, pass no `model` at all.)
 </details>
 
 <details>
@@ -784,11 +784,40 @@ state dir is still shared and a fresh server process starts with nothing recorde
 For real parallelism use **[`agent_swarm`](#swarm)** — each agy worker runs in its own isolated state
 dir (and Codex/Copilot/Cursor workers need none), so they don't race and the lock isn't needed (~2.8×
 at 3 workers). That's the supported way to run many calls at once, across any backend.
+
+The isolated state dir is a redirected `HOME`, and on **macOS** that also hides agy's stored
+credentials (the login keychain is resolved through `$HOME`), so isolated workers there fall back to
+running **serialized** in your real HOME — correct, but without the speedup. Windows is unaffected
+(Credential Manager is HOME-independent). See the [swarm auth note](#status--caveats).
 </details>
 
 ## Status & caveats
 
-- 🐛 **agy 1.1.12 killed the `model` argument — fixed.** 1.1.12 made `agy models` machine-readable,
+- 🐛 **`agent_swarm` antigravity workers died with "authentication timed out" on macOS — fixed**
+  ([#2](https://github.com/SinanTufekci/agent-intern/issues/2)). Each swarm worker gets an isolated
+  `HOME` so agy's per-process state can't collide. The module shipped asserting that auth survives
+  it because agy reads credentials from the OS credential store — **true on Windows** (Credential
+  Manager is keyed to the user session; re-verified on 1.1.12 that `agy models` inside a fake HOME
+  returns the full list) and **false on macOS**, where the login keychain is resolved through
+  `$HOME`. So every antigravity worker started a fresh OAuth flow and died at agy's 60 s
+  `authentication timed out`, while `antigravity_ask` — which never touches HOME — kept working.
+  Isolation is now conditional, decided two ways:
+  - **Proactively**, by probing once per process: `agy -p "/usage"` inside a throwaway isolated
+    HOME. On agy 1.1.11+ that's free (the CLI answers it, no agent turn, no quota), but the quota
+    table comes from your account, so it can't be answered without working credentials. Skipped on
+    Windows, where it can't fail.
+  - **Reactively**, because a probe is a proxy and this one can't be tested on the platform it
+    exists for: any worker that fails with an authentication signature flips the process to
+    serialized mode and **retries itself there**, so you get an answer even if the probe was wrong
+    or unavailable.
+
+  In serialized mode the antigravity workers run in your real HOME behind the same lock the
+  single-agent tools use — correct everywhere, at the cost of the parallelism (other backends stay
+  parallel; a watched worker shows a note instead of live steps, since the step feed reads the
+  isolated transcript). `AGY_BRIDGE_NO_HOME_ISOLATION=1` forces it without a probe. Diagnosed by
+  inspection from the report; **not reproduced on a Mac** — if you're on macOS, please confirm on #2.
+- 🐛 **agy 1.1.11 killed the `model` argument — fixed** ([#3](https://github.com/SinanTufekci/agent-intern/issues/3)).
+  agy made `agy models` machine-readable,
   turning each line from a bare slug into a **tab-separated `<slug>\t<human label>` record**
   (`gemini-3.6-flash-high\tGemini 3.6 Flash (High)`). The bridge read the whole line as the slug, so
   its up-front validation rejected **every valid model** with an error that listed the very slug it
@@ -801,7 +830,9 @@ at 3 workers). That's the supported way to run many calls at once, across any ba
   `agents` subcommands, but **the shipped binary has no such flag** (`agy models --output-format
   json` → `flags provided but not defined: -output-format`), so TSV is what there is to parse. The
   live slug list is unchanged from 1.1.6, and this suite stayed green through the break because
-  every model test mocked the old format — the new tests pin **both** formats down.
+  every model test mocked the old format — the new tests pin **both** formats down. The change is
+  in no changelog entry: the guard test was green on 1.1.10, #3 reports the break on **1.1.11**,
+  and it was reproduced here on 1.1.12.
 - ✨ **`antigravity_status` now reports your remaining AI Pro quota — for free.** agy 1.1.11/1.1.12
   answer read-only slash commands **in print mode itself**: no agent turn, no quota spend, no
   conversation left behind (1.1.11: `/usage`, `/quota`, `/credits`, `/model`, `/effort`, `/skills`;

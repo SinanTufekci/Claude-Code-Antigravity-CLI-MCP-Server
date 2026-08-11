@@ -10,6 +10,47 @@ summary.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-11
+
+Fixes the two issues reported against 0.23.x. Both come from an assumption that held on
+the platform the bridge was developed on and nowhere else.
+
+### Fixed
+
+- **`agent_swarm` antigravity workers always failed with "authentication timed out" on
+  macOS** ([#2](https://github.com/SinanTufekci/agent-intern/issues/2)). Every swarm worker
+  runs in an isolated `HOME` so agy's per-process state can't collide, and the module
+  shipped asserting that auth survives that because agy reads credentials from the OS
+  credential store. That is **true on Windows** — Credential Manager is keyed to the user
+  session, and `agy models` inside a fake HOME still returns the full list (re-verified on
+  1.1.12) — and **false on macOS**, where the login keychain is resolved through `$HOME`.
+  Every antigravity worker therefore started a fresh OAuth flow and died at agy's 60 s
+  timeout, while `antigravity_ask`, which never touches HOME, kept working. Isolation is now
+  conditional:
+  - **Proactive probe**, once per process: `agy -p "/usage"` inside a throwaway isolated
+    HOME. Free on agy 1.1.11+ (the CLI answers it — no agent turn, no quota, no conversation
+    left behind) but unanswerable without working credentials, which is the property being
+    tested. Skipped on Windows, where it cannot fail. An ambiguous result (network blip,
+    unexpected exit, agy older than 1.1.11) keeps the parallel path rather than costing
+    everyone their speedup.
+  - **Reactive fallback**, because a probe is a proxy and this one cannot be tested on the
+    platform it exists for: any worker failing with an authentication signature latches
+    serialized mode for the process and **retries itself** there, so the user still gets an
+    answer if the probe was wrong or unavailable.
+
+  Serialized workers run through the same locked single-agent path the non-swarm tools use,
+  with `pin=False` so a worker can't claim the workspace's continue slot (`_run_agy` grew the
+  flag; codex workers already had it). Covers text and image workers, watched and unwatched;
+  a watched serialized worker posts a note explaining the missing live steps, since the step
+  feed reads the isolated transcript that no longer exists. `AGY_BRIDGE_NO_HOME_ISOLATION=1`
+  forces serialized mode without a probe. **Diagnosed by inspection, not reproduced on a
+  Mac** — macOS confirmation welcome on #2.
+- **Corrected which agy release broke `model`** ([#3](https://github.com/SinanTufekci/agent-intern/issues/3),
+  fixed in 0.24.0 below). The tab-separated `agy models` output was attributed to 1.1.12,
+  where the bridge observed it; #3 reports the same rejection on **1.1.11**. The change is in
+  no changelog entry, so it is now dated by evidence: guard test green on 1.1.10, reported on
+  1.1.11, reproduced here on 1.1.12. Docs only — the parser reads both formats.
+
 ## [0.24.0] - 2026-08-11
 
 agy **1.1.12 killed the `model` argument** by making `agy models` machine-readable, and
@@ -976,7 +1017,8 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.1...v0.23.0

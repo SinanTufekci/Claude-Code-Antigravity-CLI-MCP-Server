@@ -14,6 +14,22 @@ import server
 import swarm
 import swarm_watch
 
+
+@pytest.fixture(autouse=True)
+def _pin_isolation_ok():
+    """Pin HOME isolation ON for every test, and clear the latch afterwards.
+
+    swarm._ISOLATION_OK is process-global and resolved lazily by a subprocess
+    probe, so leaving it unset would (a) let one test's latched failure change the
+    next test's code path and (b) spawn a real `agy -p "/usage"` from a unit test
+    on any non-Windows machine that has agy installed. Tests for the fallback set
+    it explicitly.
+    """
+    swarm._ISOLATION_OK = True
+    yield
+    swarm._ISOLATION_OK = None
+
+
 # --------------------------------------------------------------------------
 # _normalize_workspaces
 # --------------------------------------------------------------------------
@@ -413,6 +429,201 @@ def test_run_text_worker_exit0_without_transcript_surfaces_stderr(monkeypatch, t
     res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
     assert res.ok is False
     assert "no readable transcript" in res.error and "auto-denied" in res.error
+
+
+# --------------------------------------------------------------------------
+# HOME-isolation auth fallback (issue #2: macOS hides agy's credentials from a
+# worker whose HOME is redirected, so it starts a fresh OAuth flow and times out)
+# --------------------------------------------------------------------------
+
+# The failure exactly as reported, stderr and all.
+_AUTH_FAILURE_TEXT = (
+    "agy exited 1: ...&state=...\nWaiting for authentication (timeout 60s)...\n"
+    "Or, paste the authorization code here and press Enter:\n"
+    "Error: authentication timed out."
+)
+_USAGE_TSV = "Gemini Models\tWeekly Limit Remaining\t100%\t2026-08-11T18:50:23Z\n"
+
+
+def test_looks_like_auth_failure_matches_the_reported_text():
+    assert swarm._looks_like_auth_failure(_AUTH_FAILURE_TEXT)
+    assert swarm._looks_like_auth_failure("Error: NOT AUTHENTICATED")
+
+
+def test_looks_like_auth_failure_ignores_unrelated_errors():
+    assert not swarm._looks_like_auth_failure("agy exited 1: rate limited, try again")
+    assert not swarm._looks_like_auth_failure(None)
+
+
+def test_isolation_ok_env_override_skips_the_probe(monkeypatch):
+    monkeypatch.setattr(swarm, "_ISOLATION_OK", None)
+    monkeypatch.setenv("AGY_BRIDGE_NO_HOME_ISOLATION", "1")
+    monkeypatch.setattr(swarm, "_probe_isolated_auth", lambda: pytest.fail("must not probe"))
+    assert swarm.isolation_ok() is False
+
+
+@pytest.mark.parametrize("probed,expected", [(True, True), (False, False), (None, True)])
+def test_isolation_ok_from_probe(monkeypatch, probed, expected):
+    # An ambiguous probe (None) must keep the parallel path — the reactive
+    # fallback still covers a real auth failure.
+    monkeypatch.setattr(swarm, "_ISOLATION_OK", None)
+    monkeypatch.delenv("AGY_BRIDGE_NO_HOME_ISOLATION", raising=False)
+    calls = {"n": 0}
+
+    def probe():
+        calls["n"] += 1
+        return probed
+
+    monkeypatch.setattr(swarm, "_probe_isolated_auth", probe)
+    assert swarm.isolation_ok() is expected
+    assert swarm.isolation_ok() is expected
+    assert calls["n"] == 1  # resolved once per process
+
+
+@pytest.mark.parametrize("osname,follows", [("nt", False), ("posix", True)])
+def test_credential_store_follows_home_by_platform(monkeypatch, osname, follows):
+    # Safe to patch os.name here only because this function builds no Path — doing
+    # so around pathlib re-points it at the wrong flavour and raises.
+    monkeypatch.setattr(swarm.os, "name", osname)
+    assert swarm._credential_store_follows_home() is follows
+
+
+def test_probe_skipped_where_home_cannot_hide_auth(monkeypatch):
+    # Windows' credential store is HOME-independent, so the probe would burn
+    # seconds per process on a question that cannot fail there.
+    monkeypatch.setattr(swarm, "_credential_store_follows_home", lambda: False)
+    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn"))
+    assert swarm._probe_isolated_auth() is None
+
+
+def test_probe_none_when_agy_cannot_answer_usage(monkeypatch):
+    monkeypatch.setattr(swarm, "_credential_store_follows_home", lambda: True)
+    monkeypatch.setattr(server, "supports_print_usage", lambda: False)
+    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn"))
+    assert swarm._probe_isolated_auth() is None
+
+
+def _probe_env(monkeypatch, result):
+    monkeypatch.setattr(swarm, "_credential_store_follows_home", lambda: True)
+    monkeypatch.setattr(server, "supports_print_usage", lambda: True)
+    monkeypatch.setattr(swarm.subprocess, "run", result)
+
+
+def test_probe_true_on_a_real_quota_table(monkeypatch):
+    import subprocess as sp
+
+    _probe_env(
+        monkeypatch,
+        lambda *a, **k: sp.CompletedProcess(a, 0, stdout=_USAGE_TSV, stderr=""),
+    )
+    assert swarm._probe_isolated_auth() is True
+
+
+def test_probe_false_on_timeout(monkeypatch):
+    import subprocess as sp
+
+    def boom(*a, **k):
+        raise sp.TimeoutExpired(cmd="agy", timeout=25)
+
+    _probe_env(monkeypatch, boom)
+    assert swarm._probe_isolated_auth() is False  # sat in agy's sign-in wait
+
+
+def test_probe_false_on_auth_signature(monkeypatch):
+    import subprocess as sp
+
+    _probe_env(
+        monkeypatch,
+        lambda *a, **k: sp.CompletedProcess(a, 1, stdout="", stderr=_AUTH_FAILURE_TEXT),
+    )
+    assert swarm._probe_isolated_auth() is False
+
+
+def test_probe_none_on_an_unrelated_failure(monkeypatch):
+    import subprocess as sp
+
+    _probe_env(
+        monkeypatch,
+        lambda *a, **k: sp.CompletedProcess(a, 1, stdout="", stderr="network unreachable"),
+    )
+    assert swarm._probe_isolated_auth() is None
+
+
+def test_text_worker_uses_serialized_path_when_isolation_is_off(monkeypatch, tmp_path):
+    monkeypatch.setattr(swarm, "_ISOLATION_OK", False)
+    monkeypatch.setattr(swarm, "_make_isolated_home", lambda: pytest.fail("must not isolate"))
+    seen = {}
+
+    def fake_run_agy(prompt, ws, cont, timeout_s, model=None, pin=True):
+        seen.update(prompt=prompt, ws=ws, model=model, pin=pin)
+        return "serial answer"
+
+    monkeypatch.setattr(server, "_run_agy", fake_run_agy)
+    res = swarm._run_text_worker(0, "hi", str(tmp_path), "gemini-3.1-pro-high", 10)
+    assert res.ok and res.answer == "serial answer"
+    # pin=False: a swarm worker must not claim the workspace's continue slot.
+    assert seen["pin"] is False and seen["model"] == "gemini-3.1-pro-high"
+
+
+def test_text_worker_retries_serialized_after_an_auth_failure(monkeypatch, tmp_path):
+    """The reactive half of the fix: the worker recovers instead of just failing."""
+
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = _AUTH_FAILURE_TEXT
+
+    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: _Failed())
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: "recovered")
+    res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
+    assert res.ok and res.answer == "recovered"
+    # ...and the process latches serialized mode, so worker 2..N skip the failure.
+    assert swarm._ISOLATION_OK is False
+
+
+def test_text_worker_does_not_retry_other_failures(monkeypatch, tmp_path):
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "agy exited 1: quota exhausted"
+
+    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: _Failed())
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: pytest.fail("must not retry"))
+    res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
+    assert res.ok is False and "quota exhausted" in res.error
+    assert swarm._ISOLATION_OK is True  # unrelated failures don't latch
+
+
+def test_image_worker_auth_failure_retries_serialized(monkeypatch, tmp_path):
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = _AUTH_FAILURE_TEXT
+
+    target = str(tmp_path / "out.png")
+    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: _Failed())
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: "")
+    monkeypatch.setattr(server, "_finalize_image", lambda t, txt, start: (target, "png", 123))
+    res = swarm._run_image_worker(0, "draw", target, str(tmp_path), 10)
+    assert res.ok and res.image_path == target and res.image_format == "png"
+    assert swarm._ISOLATION_OK is False
+
+
+def test_watched_serialized_worker_reports_progress_and_a_note(monkeypatch, tmp_path):
+    # No isolated transcript to pump, so the viewer must be told why there are no
+    # live steps instead of showing an empty panel that reads as a hung worker.
+    monkeypatch.setattr(swarm, "_ISOLATION_OK", False)
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: "serial answer")
+    appended, finished = [], []
+    monkeypatch.setattr(swarm_watch, "worker_append", lambda i, lines: appended.extend(lines))
+    monkeypatch.setattr(swarm_watch, "worker_update", lambda i, **kw: None)
+    monkeypatch.setattr(
+        swarm_watch, "worker_finish", lambda i, s, a, e, **kw: finished.append((s, a))
+    )
+    res = swarm._run_text_worker_watched(0, "hi", str(tmp_path), None, 10)
+    assert res.ok and res.answer == "serial answer"
+    assert finished == [("done", "serial answer")]
+    assert any("serialized" in ln["text"] for ln in appended)
 
 
 def test_normalize_tasks_copilot_default_sandbox_and_aliases():

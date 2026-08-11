@@ -46,7 +46,7 @@ run with stdin closed (it blocks on an interactive terminal otherwise), same as
 Model SLUGS (agy 1.1.5, list re-checked live on 1.1.12) — the label format CHANGED
 and every old example is now invalid. 1.1.5 introduced "stable, user-facing model
 slugs" that the /model picker shows and --model accepts, and `agy models` emits
-those slugs (bare through 1.1.11; as `<slug>\t<human label>` from 1.1.12 on — see
+those slugs (bare through 1.1.10; as `<slug>\t<human label>` from 1.1.11 on — see
 _parse_models_output). The live list (re-read on 1.1.12, unchanged since 1.1.6) is:
 gemini-3.6-flash-{low,medium,high},
 gemini-3.5-flash-{low,medium,high}, gemini-3.1-pro-{low,high}, claude-sonnet-4-6,
@@ -273,10 +273,12 @@ TUI setting, and the compound-command allow-always improvement is an interactive
 permission-prompt change (print mode still bypasses that via
 --dangerously-skip-permissions).
 
-Machine-readable `agy models` (agy 1.1.12) — the second agy change that DID break
+Machine-readable `agy models` (agy 1.1.11) — the second agy change that DID break
 this bridge, and it broke the `model` argument outright rather than degrading it.
-1.1.12 made the `models` and `agents` subcommands machine-readable, and their lines
-went from a bare slug to a TAB-SEPARATED `<slug>\t<human label>` record. The bridge
+1.1.11/1.1.12 made the `models` and `agents` subcommands machine-readable, and their
+lines went from a bare slug to a TAB-SEPARATED `<slug>\t<human label>` record (the
+change is in no changelog entry; the canary test was green on 1.1.10, issue #3
+reports the break on 1.1.11, and it was reproduced here on 1.1.12). The bridge
 read each whole line as a slug, so validate_model then rejected EVERY valid model
 with an error that listed the very slug it had just refused ("unknown agy model
 'gemini-3.6-flash-high'; expected one of: gemini-3.6-flash-high<TAB>Gemini 3.6 Flash
@@ -478,7 +480,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -1519,14 +1521,17 @@ _AGY_MODELS_LOCK = threading.Lock()
 def _parse_models_output(stdout: str) -> list[str]:
     """Slugs from `agy models` stdout — the first field of each line.
 
-    agy 1.1.12 made the subcommand machine-readable and its lines are now
+    agy 1.1.11 made the subcommand machine-readable and its lines are now
     TAB-SEPARATED records, `<slug>\\t<human label>`:
 
         gemini-3.6-flash-high\tGemini 3.6 Flash (High)
 
-    where 1.1.8 printed the bare slug. Reading the whole line as the slug
-    therefore rejected EVERY valid model, silently killing the `model` argument on
-    all three antigravity tools — verified live on 1.1.12 through this bridge:
+    where 1.1.8 printed the bare slug. The change is undocumented and lands
+    between two verified points: the canary test below was green on 1.1.10, and
+    issue #3 reports the tab-separated rejection on 1.1.11, where this bridge saw
+    it on 1.1.12. Reading the whole line as the slug rejected EVERY valid model,
+    silently killing the `model` argument on all three antigravity tools —
+    verified live on 1.1.12 through this bridge:
     antigravity_ask(model="gemini-3.6-flash-high") raised "unknown agy model
     'gemini-3.6-flash-high'; expected one of: gemini-3.6-flash-high<TAB>Gemini 3.6
     Flash (High), ...", an error listing the very slug it had just refused. Keeping
@@ -1699,7 +1704,17 @@ def _run_agy(
     continue_conv: bool,
     timeout_s: int,
     model: Optional[str] = None,
+    pin: bool = True,
 ) -> str:
+    """Run one agy print-mode call under _AGY_LOCK and return its answer.
+
+    `pin=False` runs without recording the conversation id for this workspace, so
+    the run cannot become the thread a later antigravity_continue resumes. The
+    swarm's serialized fallback (swarm._run_text_worker_serialized) passes it for
+    the same reason codex workers pass `pin=False`: a swarm is N independent
+    one-shot tasks, and letting the last one to finish claim the workspace's
+    continue slot would silently redirect the user's next continue.
+    """
     os.makedirs(workspace, exist_ok=True)  # agy's cwd must exist (mirrors the swarm)
     use_json = supports_json_output()
     args, pinned_conv = _build_agy_args(
@@ -1760,7 +1775,8 @@ def _run_agy(
         if result is not None:
             conv_id = result.get("conversation_id") or ""
             if conv_id:
-                _record_conv_id(workspace, conv_id)
+                if pin:
+                    _record_conv_id(workspace, conv_id)
                 pinned_conv = pinned_conv or conv_id
             status = result.get("status")
             answer = (result.get("response") or "").strip()
