@@ -111,11 +111,17 @@ def _clean_agy_json_state():
     pre-1.1.8 text/transcript paths would silently switch behaviour depending on
     which agy happens to be installed on the machine. Tests that exercise the 1.1.8
     paths opt in explicitly (fake_agy_json, or monkeypatching the flag).
+
+    The 1.1.11 `/usage` probe is pinned OFF for the same reason plus a sharper one:
+    left unresolved, _collect_status on a machine with a current agy would SPAWN
+    that probe for real in a unit test. Quota tests opt in explicitly.
     """
     server._AGY_JSON_SUPPORT = False
+    server._AGY_USAGE_GATE = False
     server._CONV_BY_WORKSPACE.clear()
     yield
     server._AGY_JSON_SUPPORT = None
+    server._AGY_USAGE_GATE = None
     server._CONV_BY_WORKSPACE.clear()
 
 
@@ -733,6 +739,48 @@ def test_list_agy_models_parses_and_caches(monkeypatch):
     # second call is served from the process cache (no second subprocess)
     assert server.list_agy_models() == ["A", "B", "C"]
     assert calls["n"] == 1
+
+
+# agy 1.1.12 made `agy models` machine-readable: every line became a tab-separated
+# `<slug>\t<human label>` record. Reading the whole line as the slug made
+# validate_model reject EVERY valid model, killing the `model` argument on all three
+# antigravity tools while this suite stayed green — the mocks all spoke the old
+# format. These pin BOTH formats down so the next change to it fails here.
+def test_parse_models_output_reads_1112_tab_separated_records():
+    stdout = (
+        "gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n"
+        "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
+    )
+    assert server._parse_models_output(stdout) == ["gemini-3.6-flash-high", "claude-sonnet-4-6"]
+
+
+def test_parse_models_output_still_reads_bare_slugs():
+    # Pre-1.1.12 shape: one bare slug per line, no tab, no label.
+    assert server._parse_models_output("gemini-3.5-flash-high\n gpt-oss-120b-medium \n\n") == [
+        "gemini-3.5-flash-high",
+        "gpt-oss-120b-medium",
+    ]
+
+
+def test_parse_models_output_drops_chatter_lines():
+    # A slug never contains whitespace, so a progress/status line is not a model.
+    # 1.1.12 prints "Fetching available models..." on stderr, but older and newer
+    # builds may not, and it must never end up in the accepted-model list.
+    stdout = "Fetching available models...\ngemini-3.1-pro-high\tGemini 3.1 Pro (High)\n"
+    assert server._parse_models_output(stdout) == ["gemini-3.1-pro-high"]
+
+
+def test_validate_model_accepts_slug_from_tab_separated_list(monkeypatch):
+    """The 1.1.12 break, end to end: a valid slug must survive `agy models` output."""
+    monkeypatch.setattr(server, "_AGY_MODELS_CACHE", None)
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, 0, stdout="gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n", stderr=""
+        )
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    assert server.validate_model("gemini-3.6-flash-high") == "gemini-3.6-flash-high"
 
 
 def test_list_agy_models_empty_on_subprocess_error(monkeypatch):
@@ -2233,6 +2281,99 @@ def test_antigravity_status_formats_report(status_dirs, monkeypatch):
     assert out.startswith("agy bridge status")
     assert "[ok]" in out
     assert "Overall:" in out
+
+
+# --------------------------------------------------------------------------
+# quota rows  (agy 1.1.11+ answers `-p "/usage"` itself, for free)
+# --------------------------------------------------------------------------
+
+_USAGE_TSV = (
+    "Gemini Models\tWeekly Limit Remaining\t100%\t2026-08-11T18:50:23Z\n"
+    "Gemini Models\tFive Hour Limit Remaining\t100%\t2026-08-11T11:44:37Z\n"
+    "Claude and GPT models\tWeekly Limit Remaining\t99%\t2026-08-12T07:54:32Z\n"
+)
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [("1.1.10", False), ("1.1.11", True), ("1.2.0", True), ("", False)],
+)
+def test_supports_print_usage_gate(monkeypatch, version, expected):
+    # A SAFETY gate: below 1.1.11 the same argv is a prompt, so a probe advertised
+    # as free would spend the user's quota. An unparseable version must answer False.
+    monkeypatch.setattr(server, "_AGY_USAGE_GATE", None)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: version or None)
+    assert server.supports_print_usage() is expected
+
+
+def test_parse_usage_rows_groups_by_family():
+    rows = server._parse_usage_rows(_USAGE_TSV)
+    assert rows == [
+        ("quota: Gemini Models", True, "Weekly 100%, Five Hour 100%"),
+        ("quota: Claude and GPT models", True, "Weekly 99%"),
+    ]
+
+
+def test_parse_usage_rows_flags_an_exhausted_family():
+    # 0% remaining means every call against that family fails until the window
+    # resets — exactly what a pre-flight status check exists to surface.
+    rows = server._parse_usage_rows(
+        "Gemini Models\tWeekly Limit Remaining\t0%\t2026-08-11T18:50:23Z\n"
+    )
+    assert rows == [("quota: Gemini Models", False, "Weekly 0%")]
+
+
+def test_parse_usage_rows_ignores_unparseable_lines():
+    # agy's format may change again; a status probe must never be what raises.
+    assert server._parse_usage_rows("some prose\n\nGemini Models\tWeekly\n") == []
+
+
+def test_read_agy_usage_argv_keeps_agy_slash_expansion(monkeypatch):
+    """The probe must NOT carry --disable-slash-commands.
+
+    That flag is what makes agy treat a leading "/usage" as literal text, so passing
+    it here would send the prompt to the model: quota spent, prose returned, and a
+    conversation left behind — from the one tool that promises to spend nothing.
+    """
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        return subprocess.CompletedProcess(args, 0, stdout=_USAGE_TSV, stderr="")
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    assert server._read_agy_usage() == _USAGE_TSV
+    assert "--disable-slash-commands" not in seen["args"]
+    assert "--dangerously-skip-permissions" not in seen["args"]
+    assert seen["args"][-2:] == ["-p", "/usage"]
+
+
+def test_read_agy_usage_none_on_failure(monkeypatch):
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError()))
+    assert server._read_agy_usage() is None
+
+
+def test_quota_status_rows_empty_on_old_agy(monkeypatch):
+    # Nothing to say, and a failing row would flip a healthy setup to PROBLEMS FOUND.
+    monkeypatch.setattr(server, "supports_print_usage", lambda: False)
+    monkeypatch.setattr(server, "_read_agy_usage", lambda: pytest.fail("must not probe"))
+    assert server._quota_status_rows() == []
+
+
+def test_quota_status_rows_reports_unreadable_without_failing(monkeypatch):
+    monkeypatch.setattr(server, "supports_print_usage", lambda: True)
+    monkeypatch.setattr(server, "_read_agy_usage", lambda: None)
+    rows = server._quota_status_rows()
+    assert len(rows) == 1 and rows[0][0] == "quota" and rows[0][1] is True
+
+
+def test_collect_status_includes_quota_rows(status_dirs, monkeypatch):
+    monkeypatch.setattr(server, "_get_agy_version", lambda: "1.1.12")
+    monkeypatch.setattr(server, "supports_print_usage", lambda: True)
+    monkeypatch.setattr(server, "_read_agy_usage", lambda: _USAGE_TSV)
+    d = _status_dict(server._collect_status())
+    assert d["quota: Gemini Models"] == (True, "Weekly 100%, Five Hour 100%")
+    assert d["quota: Claude and GPT models"][0] is True
 
 
 def test_codex_status_includes_bridge_version_row(monkeypatch):

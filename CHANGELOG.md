@@ -10,6 +10,74 @@ summary.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-11
+
+agy **1.1.12 killed the `model` argument** by making `agy models` machine-readable, and
+**1.1.11/1.1.12 made quota readable for free** — so this release is one break repaired and
+one capability adopted. Verified live against agy 1.1.12 end-to-end.
+
+### Fixed
+
+- **`model` was rejected on every antigravity tool (agy 1.1.12).** 1.1.12 turned each `agy
+  models` line from a bare slug into a tab-separated `<slug>\t<human label>` record
+  (`gemini-3.6-flash-high\tGemini 3.6 Flash (High)`). The bridge validated the requested slug
+  against whole lines, so **every valid model was refused** with an error that listed the very
+  slug it had just rejected: `unknown agy model 'gemini-3.6-flash-high'; expected one of:
+  gemini-3.6-flash-high<TAB>Gemini 3.6 Flash (High), …`. Reproduced end-to-end through
+  `antigravity_ask` before the fix; `antigravity_ask`/`antigravity_continue`/`agent_swarm` were
+  all affected, while calls that omitted `model` were untouched. `_parse_models_output` now keeps
+  the first tab field — which reads the old bare-slug format too — and drops fields containing
+  whitespace, so a progress line can never enter the accepted-model list. The whole suite stayed
+  green through this break because every model test mocked the old format; the new tests pin both
+  formats, and the live canary that *did* catch it now passes against 1.1.12.
+  - Worth knowing for the next release: 1.1.12's changelog advertises `--output-format json` for
+    the `models` and `agents` subcommands, but the **shipped binary has no such flag** (`agy
+    models --output-format json` exits 1 with `flags provided but not defined: -output-format`).
+    TSV is the only machine-readable form the subcommand has.
+
+### Added
+
+- **`antigravity_status` reports remaining AI Pro quota, and still spends none.** agy 1.1.11 and
+  1.1.12 answer read-only slash commands in print mode themselves — no agent turn, no quota, no
+  conversation left behind — so the status tool now runs `agy -p "/usage"` and adds a row per
+  model family: `quota: Gemini Models [ok] Weekly 100%, Five Hour 100%`. A family at **0%** is
+  reported as a problem, since every call against it will fail until its window resets; the tool
+  already existed to tell you what will go wrong before you spend a call, and "you are out of
+  quota" is the most common such answer.
+  - Gated at agy 1.1.11 as a **safety** gate, not a feature probe: below that the same argv is a
+    prompt, so a diagnostic advertised as free would quietly spend a call. On older agy the rows
+    are simply absent rather than reported as a failure.
+  - The probe is the one bridge call that deliberately **omits** `--disable-slash-commands` — that
+    flag is what makes agy treat a leading `/usage` as literal text, which would send the prompt
+    to the model. A regression test asserts the argv keeps agy's slash handling (and carries no
+    permission opt-out).
+
+### Verified
+
+- **The slash shield still holds on 1.1.12.** 1.1.11 replaced the silent fall-through for
+  interactive-only commands with an explicit refusal recommending the exact flag this bridge
+  already passes (`agy -p "/clear"` → exit 2, *"pass --disable-slash-commands to send /clear to
+  the model as literal text"*). Re-verified end-to-end: `antigravity_ask("/clear Reply with the
+  single word BRIDGE…")` returned `BRIDGE`. The new read-only command set is why the shield stays
+  load-bearing — unshielded, a prompt opening with `/model` gets agy's table, not an answer.
+- **The continue path is unaffected by 1.1.12's diagnostics change.** 1.1.12 stopped swallowing
+  startup diagnostics into the log file, including the `--conversation` not-found warning this
+  bridge can trigger. They go to **stderr**: verified with a deliberately bogus `--conversation`
+  that stdout stays a pure JSON result object (exit 0, warning on stderr, agy silently starting a
+  new conversation).
+- **`--model` is honored in print mode**, re-confirmed the free way on 1.1.12: `agy --model
+  gemini-3.1-pro-high -p "/model"` answers `gemini-3.1-pro-high` where a bare `-p "/model"`
+  answers the settings.json default. The live slug list is unchanged from 1.1.6.
+- `VERIFIED_AGY_VERSION` → `(1, 1, 12)`. Benign wins needing no change: a **Windows** crash
+  resolving the conversation transcript path is fixed (the artifact watch mode's `log_uri` points
+  at), headless `-p` now settles a choice itself instead of stalling on an unanswerable question,
+  and 1.1.11 made retries honor the server's retry delay and stopped an empty credits response
+  reading as "Out of credits". `--effort` stays unadopted with a harder reason than before: it is
+  not a universal axis — `--model claude-sonnet-4-6 --effort low` fails with *"--effort is not
+  supported for model"* — while the gemini slugs already bake the level in. Everything else in
+  1.1.11/1.1.12 (Vim editing mode, artifact-viewer polish, plugin enablement, admin controls and
+  MCP progress callbacks) is interactive-TUI or agy-as-MCP-*client* work.
+
 ## [0.23.1] - 2026-08-05
 
 Hardens the **watch viewer**, the one part of the bridge that opens a network
@@ -908,7 +976,8 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.1...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.1...v0.23.0
 [0.22.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.22.0...v0.22.1

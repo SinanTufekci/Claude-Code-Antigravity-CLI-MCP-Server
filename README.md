@@ -269,7 +269,7 @@ do the same.
 | `antigravity_continue(prompt, workspace?, model?, timeout_s?=180, watch?=false)` | Continue the conversation **rooted at `workspace`** (pinned by id). agy's model is per-invocation, so `model` can differ from the original ask. `watch=true` opens the live view. |
 | `antigravity_image(prompt, output_path?, workspace?, timeout_s?=240, watch?=false)` | Generate an image; saves the file (extension corrected to the real bytes) and returns its path + format/size. `watch=true` streams progress and **shows the image** inline. |
 | `antigravity_image_swarm(prompts, output_paths?, workspaces?, max_concurrency?=4, timeout_s?=240, watch?=false)` | Generate **several images in parallel** (one worker per prompt). |
-| `antigravity_status()` | Setup diagnostics: **the bridge's own version + whether a newer release is available**, plus agy version/compat, state dirs, and newest-transcript readability. Spends no quota. |
+| `antigravity_status()` | Setup diagnostics: **the bridge's own version + whether a newer release is available**, **remaining AI Pro quota per model family** (agy 1.1.11+), plus agy version/compat, state dirs, and newest-transcript readability. Spends no quota. |
 
 ### 🤖 Codex
 
@@ -727,7 +727,7 @@ defaults to **`gemini-3.6-flash-high`** as of agy 1.1.6 — speed-optimized for 
 **agy 1.1.5 renamed every model**, replacing the old human labels (`"Gemini 3.1 Pro (High)"`) with
 stable slugs (`gemini-3.1-pro-high`) — the old form is no longer accepted, so pass slugs. **agy 1.1.6
 then added the `gemini-3.6-flash` family and moved the default to it.** The full list, re-checked live
-on 1.1.8 and unchanged since 1.1.6:
+on 1.1.12 and unchanged since 1.1.6:
 `gemini-3.6-flash-low|medium|high`, `gemini-3.5-flash-low|medium|high`, `gemini-3.1-pro-low|high`,
 `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`. Note the slug bakes in the
 reasoning effort, which is why the flash and pro models appear once per level.
@@ -737,7 +737,9 @@ call, so earlier bridge versions stayed single-model. **Re-verified on agy 1.0.1
 fixed** — a Claude model answers as Anthropic Claude, a Gemini model as Gemini, each in seconds. One
 caveat the bridge handles for you: agy **silently ignores an unknown model** (it falls back to the
 default with no error), so the bridge validates your slug against `agy models` and rejects a typo up
-front.
+front. (That validation is also what agy 1.1.12 broke, by making `agy models` print
+`<slug>\t<human label>` instead of a bare slug — see [Status & caveats](#status--caveats). Fixed as
+of bridge 0.24.0; on 0.23.x with agy 1.1.12, pass no `model` at all.)
 </details>
 
 <details>
@@ -786,6 +788,48 @@ at 3 workers). That's the supported way to run many calls at once, across any ba
 
 ## Status & caveats
 
+- 🐛 **agy 1.1.12 killed the `model` argument — fixed.** 1.1.12 made `agy models` machine-readable,
+  turning each line from a bare slug into a **tab-separated `<slug>\t<human label>` record**
+  (`gemini-3.6-flash-high\tGemini 3.6 Flash (High)`). The bridge read the whole line as the slug, so
+  its up-front validation rejected **every valid model** with an error that listed the very slug it
+  had just refused: `unknown agy model 'gemini-3.6-flash-high'; expected one of:
+  gemini-3.6-flash-high<TAB>Gemini 3.6 Flash (High), …`. Reproduced end-to-end through
+  `antigravity_ask`; `model` was unusable on all three antigravity tools (omitting it still worked —
+  the default model path never touched this code). The parser now keeps the first tab field, which
+  reads both formats, and drops any field containing whitespace (a slug never has a space, so such a
+  line is chatter). Note 1.1.12's changelog advertises `--output-format json` for the `models` and
+  `agents` subcommands, but **the shipped binary has no such flag** (`agy models --output-format
+  json` → `flags provided but not defined: -output-format`), so TSV is what there is to parse. The
+  live slug list is unchanged from 1.1.6, and this suite stayed green through the break because
+  every model test mocked the old format — the new tests pin **both** formats down.
+- ✨ **`antigravity_status` now reports your remaining AI Pro quota — for free.** agy 1.1.11/1.1.12
+  answer read-only slash commands **in print mode itself**: no agent turn, no quota spend, no
+  conversation left behind (1.1.11: `/usage`, `/quota`, `/credits`, `/model`, `/effort`, `/skills`;
+  1.1.12: `/permissions`, `/hooks`, `/help`, `/config`, `/changelog`). The status tool runs
+  `agy -p "/usage"` and adds a row per model family — `quota: Gemini Models [ok] Weekly 100%, Five
+  Hour 100%` — flagging a family at **0%** as a problem, since every call against it fails until its
+  window resets. Version-gated at 1.1.11 as a *safety* gate: on older agy the same argv is a prompt,
+  so a diagnostic advertised as free would quietly spend a call. The probe is the one bridge call
+  that deliberately **omits** `--disable-slash-commands` (a regression test asserts it), and it
+  degrades to nothing on older agy rather than reporting a false problem.
+- ✅ **Re-verified the rest of agy 1.1.11/1.1.12 — nothing else broke.** The **slash shield still
+  holds**: 1.1.11 replaced the silent fall-through for interactive-only commands with an explicit
+  refusal that recommends the exact flag this bridge already passes (`agy -p "/clear"` → exit 2,
+  *"pass --disable-slash-commands to send /clear to the model as literal text"*), and
+  `antigravity_ask("/clear Reply with the single word BRIDGE…")` returned `BRIDGE` end-to-end. The
+  read-only set is why the shield stays load-bearing — unshielded, a prompt opening with `/model`
+  would get agy's table instead of an answer. 1.1.12 also stopped swallowing startup diagnostics
+  (including the `--conversation` not-found warning the continue path can trigger): they go to
+  **stderr**, so stdout stays a pure JSON result object — verified with a deliberately bogus
+  `--conversation` (exit 0, clean JSON, warning on stderr). Benign wins: a **Windows** crash
+  resolving the conversation transcript path is fixed (the artifact watch mode's `log_uri` points
+  at), headless `-p` now settles a choice itself instead of stalling on a question nobody can answer
+  (fewer timeouts), and 1.1.11 made retries honor the server's retry delay and stopped an empty
+  credits response reading as "Out of credits". `VERIFIED_AGY_VERSION` → `(1, 1, 12)`. `--effort`
+  stays unadopted, now with a harder reason: it isn't universal — `--model claude-sonnet-4-6
+  --effort low` fails with *"--effort is not supported for model"*, while the gemini slugs already
+  bake the level in. Everything else (Vim editing mode, artifact-viewer polish, plugin enablement,
+  admin controls and MCP progress callbacks — agy as an MCP *client*) is off the bridge's path.
 - 🛡️ **agy 1.1.9 broke print mode for any prompt starting with a slash — fixed by
   `--disable-slash-commands`.** 1.1.9 made `-p` **expand slash commands and skills** instead of
   sending them to the model as text, so a prompt whose first token names a registered command is

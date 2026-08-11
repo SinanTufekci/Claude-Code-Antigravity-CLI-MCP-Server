@@ -43,10 +43,11 @@ unchecked. `agy models` itself must be
 run with stdin closed (it blocks on an interactive terminal otherwise), same as
 -p is spawned with DEVNULL stdin.
 
-Model SLUGS (agy 1.1.5, list re-checked live on 1.1.8) — the label format CHANGED
+Model SLUGS (agy 1.1.5, list re-checked live on 1.1.12) — the label format CHANGED
 and every old example is now invalid. 1.1.5 introduced "stable, user-facing model
-slugs" that the /model picker shows and --model accepts, and `agy models` now emits
-ONLY those slugs. The live list (re-read on 1.1.8, unchanged since 1.1.6) is:
+slugs" that the /model picker shows and --model accepts, and `agy models` emits
+those slugs (bare through 1.1.11; as `<slug>\t<human label>` from 1.1.12 on — see
+_parse_models_output). The live list (re-read on 1.1.12, unchanged since 1.1.6) is:
 gemini-3.6-flash-{low,medium,high},
 gemini-3.5-flash-{low,medium,high}, gemini-3.1-pro-{low,high}, claude-sonnet-4-6,
 claude-opus-4-6-thinking, gpt-oss-120b-medium — 1.1.6 ADDED the gemini-3.6-flash
@@ -272,6 +273,84 @@ TUI setting, and the compound-command allow-always improvement is an interactive
 permission-prompt change (print mode still bypasses that via
 --dangerously-skip-permissions).
 
+Machine-readable `agy models` (agy 1.1.12) — the second agy change that DID break
+this bridge, and it broke the `model` argument outright rather than degrading it.
+1.1.12 made the `models` and `agents` subcommands machine-readable, and their lines
+went from a bare slug to a TAB-SEPARATED `<slug>\t<human label>` record. The bridge
+read each whole line as a slug, so validate_model then rejected EVERY valid model
+with an error that listed the very slug it had just refused ("unknown agy model
+'gemini-3.6-flash-high'; expected one of: gemini-3.6-flash-high<TAB>Gemini 3.6 Flash
+(High), …") — reproduced end-to-end through antigravity_ask before the fix.
+_parse_models_output now keeps the first tab field, which reads both formats. Two
+notes for the next reader: 1.1.12's changelog advertises `--output-format json` for
+these subcommands but the shipped binary has no such flag (`agy models
+--output-format json` exits 1 with "flags provided but not defined: -output-format";
+`agy models --help` lists only -h/--help), so TSV is the only machine-readable form
+there is; and the "Fetching available models..." progress line now goes to stderr,
+leaving stdout as the list and nothing else. The rest of the model story is
+unchanged: the live slug list is the same eleven entries as on 1.1.6, and
+`--model` IS honored in print mode again — 1.1.10 fixed the flags being applied
+after model configuration had initialized, which had made `-p --model` silently
+fall back to the persisted default. Verified on 1.1.12 the cheap way, without
+spending a call: `agy --model gemini-3.1-pro-high -p "/model"` answers
+gemini-3.1-pro-high, where a bare `-p "/model"` answers the settings.json default.
+
+Free quota reads (agy 1.1.11/1.1.12) — the first agy change that lets this bridge
+ADD a capability for nothing. Print mode now answers read-only slash commands
+itself, with no agent turn, no quota spend, and no conversation left behind:
+1.1.11 added /usage, /quota, /credits, /model, /effort, /skills, and 1.1.12 added
+/permissions, /hooks, /help, /config, /changelog. antigravity_status now runs
+`agy -p "/usage"` and reports the remaining share per model family (Gemini vs
+Claude-and-GPT, weekly and five-hour), flagging a family at 0% as a problem — the
+tool already promised to tell you what will go wrong before you spend a call, and
+"you are out of quota" is the most common such answer. supports_print_usage() gates
+it at 1.1.11 as a SAFETY gate, not a feature probe: below that the same argv is a
+prompt, so a diagnostic advertised as free would quietly spend a call. Note the
+probe deliberately omits --disable-slash-commands, the one bridge call that wants
+agy's slash handling; see _read_agy_usage.
+
+That same slash handling is why the shield stays. 1.1.11 replaced the silent
+fall-through for interactive-only commands with an explicit refusal, so the old
+hazard (a prompt starting with "/schedule …" actually running it) is now agy's own
+error rather than an action — and that error recommends exactly the flag this
+bridge already passes ("pass --disable-slash-commands to send /clear to the model
+as literal text", exit 2, verified on 1.1.12). The read-only set is the reason the
+shield is still load-bearing: unshielded, an innocent prompt opening with "/model"
+or "/usage" gets agy's table instead of an answer. Re-verified end-to-end on 1.1.12
+through this bridge — antigravity_ask("/clear Reply with the single word BRIDGE…")
+returned BRIDGE.
+
+`--effort` stays unadopted, now with a harder reason than "the slug already pins
+it": it is not a universal axis. `agy --model claude-sonnet-4-6 --effort low` exits
+with "invalid model selection … --effort is not supported for model
+'claude-sonnet-4-6'", so exposing it as a bridge argument would need per-model
+validation to avoid handing callers a flag that fails on half the menu, while
+buying nothing for the gemini slugs that already bake the level in. (1.1.10 fixed
+`--effort` being ignored in `-p`, and a bare `--effort` resolving against the
+default model instead of the selected one; both are moot while we don't pass it.)
+
+Rest of 1.1.11/1.1.12 reviewed, nothing else breaks the bridge and several changes
+help it. Checked because it looked risky and turned out benign: 1.1.12 stopped
+swallowing startup diagnostics into the log file and now surfaces them, including
+the `--conversation` not-found warning that the continue path can trigger — they go
+to STDERR, so stdout stays a pure JSON result object (verified with a deliberately
+bogus `--conversation`: exit 0, clean JSON on stdout, `warning: conversation "…"
+not found` on stderr, and agy silently starts a new conversation). Benign wins:
+1.1.12 fixed a Windows crash resolving the conversation transcript path in the
+trajectory log converter (the artifact the watch path's log_uri points at), made
+headless `-p` settle a choice itself where it would otherwise stall on a question
+nobody is there to answer (fewer bridge timeouts), raised the per-session
+tool-declaration limit (heavier MCP setups), and 1.1.11 made retries honor the
+server-supplied delay and stopped an empty credits response reading as a zero
+balance ("Out of credits" errors that were not real). Not-us: Vim editing mode,
+artifact-viewer wrapping/outline/callouts, terminal hyperlinks, plugin enablement
+in config.json, and the tool-call-header summaries are interactive-TUI; 1.1.11's
+allowlist fixes (an entry tokenizing to zero command words matching everything;
+auto-approval while in request-review mode) are real security fixes on the
+permission path that `-p` bypasses anyway via --dangerously-skip-permissions, and
+1.1.11's admin-controls and MCP-progress-callback fixes are agy acting as an MCP
+*client*, the opposite direction from this bridge.
+
 SECURITY — read this: `agy -p` runs the model as an autonomous agent that
 executes its tools (read/write files, run shell commands, reach the network)
 with no approval gate. Through 1.1.2 that was unconditional and had NO opt-out:
@@ -399,7 +478,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.23.1"
+__version__ = "0.24.0"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -431,7 +510,7 @@ _AGY_LOCK = threading.Lock()
 # Latest agy version the bridge's state-file assumptions were verified against.
 # Newer agy releases may change paths/schemas (the SQLite migration is the known
 # risk), so we warn at startup if the installed agy is newer than this.
-VERIFIED_AGY_VERSION = (1, 1, 10)
+VERIFIED_AGY_VERSION = (1, 1, 12)
 
 # First agy version whose print mode understands `--output-format json` (1.1.8).
 # Below this the flag is unknown to agy's parser, so the bridge must not pass it
@@ -443,6 +522,13 @@ JSON_OUTPUT_MIN_VERSION = (1, 1, 8)
 # understands the `--disable-slash-commands` opt-out. See
 # supports_disable_slash_commands and _agy_base_args.
 SLASH_COMMANDS_MIN_VERSION = (1, 1, 9)
+
+# First agy version that answers read-only slash commands in print mode itself,
+# without an agent turn, quota spend, or a conversation left behind (1.1.11 added
+# /usage, /quota, /credits, /model, /effort, /skills; 1.1.12 added /permissions,
+# /hooks, /help, /config, /changelog). This is what makes the quota rows in
+# antigravity_status free. See supports_print_usage.
+USAGE_PRINT_MIN_VERSION = (1, 1, 11)
 
 # Poll window for the transcript/conversation-id to appear after agy exits.
 # agy has already returned 0 by the time we read, so the common case resolves
@@ -1139,9 +1225,11 @@ def _bridge_version_status() -> tuple[str, bool, str]:
 def _collect_status() -> list[tuple[str, bool, str]]:
     """Gather setup diagnostics as (label, ok, detail) rows.
 
-    Spends no AI Pro quota: runs `agy --version`, inspects local state files, and
-    (unless AGY_BRIDGE_NO_UPDATE_CHECK is set) makes one best-effort GitHub call to
-    report whether a newer bridge release exists.
+    Spends no AI Pro quota: runs `agy --version`, asks agy for its own quota table
+    (`-p "/usage"`, answered by the CLI without an agent turn on 1.1.11+ — see
+    _quota_status_rows), inspects local state files, and (unless
+    AGY_BRIDGE_NO_UPDATE_CHECK is set) makes one best-effort GitHub call to report
+    whether a newer bridge release exists.
     """
     rows: list[tuple[str, bool, str]] = [_bridge_version_status()]
 
@@ -1153,6 +1241,7 @@ def _collect_status() -> list[tuple[str, bool, str]]:
         ok_compat = _compat_warning(version) is None
         detail = f"v{vstr} - " + ("compat OK" if ok_compat else "newer than verified")
         rows.append(("agy CLI", True, detail))
+        rows.extend(_quota_status_rows())
 
     rows.append(("base dir", AGY_DATA.exists(), str(AGY_DATA)))
 
@@ -1228,6 +1317,119 @@ def supports_disable_slash_commands() -> bool:
             version = _parse_agy_version(_get_agy_version() or "")
             _AGY_SLASH_GATE = version is not None and version >= SLASH_COMMANDS_MIN_VERSION
         return _AGY_SLASH_GATE
+
+
+# Whether this agy answers `-p "/usage"` itself instead of sending it to a model.
+# Cached for the process, like the gates above.
+_AGY_USAGE_GATE: Optional[bool] = None
+_AGY_USAGE_GATE_LOCK = threading.Lock()
+
+
+def supports_print_usage() -> bool:
+    """True if this agy answers the read-only `/usage` command in print mode (1.1.11+).
+
+    The gate is a SAFETY gate, not a feature probe. On 1.1.11+ `agy -p "/usage"` is
+    answered by the CLI itself — no agent turn, no quota, no conversation left
+    behind — so it is free for antigravity_status to call. Below 1.1.11 the same
+    argv is a PROMPT: pre-1.1.9 agy hands "/usage" to the model as literal text and
+    1.1.9/1.1.10 expand it as a command, either of which spends the user's quota to
+    answer a diagnostic that promises to spend none. An unparseable/missing version
+    answers False, so we probe only where we know it is free.
+    """
+    global _AGY_USAGE_GATE
+    with _AGY_USAGE_GATE_LOCK:
+        if _AGY_USAGE_GATE is None:
+            version = _parse_agy_version(_get_agy_version() or "")
+            _AGY_USAGE_GATE = version is not None and version >= USAGE_PRINT_MIN_VERSION
+        return _AGY_USAGE_GATE
+
+
+def _read_agy_usage() -> Optional[str]:
+    """stdout of `agy -p "/usage"`, or None if it can't be read. Spends no quota.
+
+    NOTE the argv deliberately omits BOTH flags _agy_base_args adds:
+
+    * `--disable-slash-commands` would defeat the entire point — it is what makes
+      agy treat a leading "/usage" as literal text, so the prompt would reach the
+      model, spend quota, and return prose instead of the quota table. This is the
+      one bridge call that WANTS agy's slash handling.
+    * `--dangerously-skip-permissions` is pointless here: answering /usage runs no
+      tools, and a status probe should not carry a permission opt-out.
+
+    Best-effort by contract: any failure (agy missing, non-zero exit, timeout)
+    yields None and the caller simply reports the quota as unreadable. We do NOT
+    take _AGY_LOCK: this starts no conversation and so cannot race the state files
+    (verified on 1.1.12), and taking it would make a status call queue behind a
+    long-running ask.
+    """
+    try:
+        proc = subprocess.run(
+            [AGY_BIN, "--print-timeout", "20s", "-p", "/usage"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            **_TEXT,
+            timeout=25,
+            **_spawn_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _percent_remaining(value: str) -> Optional[float]:
+    """ "99%" -> 99.0; None when the field isn't a percentage."""
+    try:
+        return float(value.strip().rstrip("%"))
+    except ValueError:
+        return None
+
+
+def _parse_usage_rows(stdout: str) -> list[tuple[str, bool, str]]:
+    """agy's `/usage` table as status rows, one per model family.
+
+    agy 1.1.11+ prints one tab-separated record per limit:
+
+        Gemini Models\tWeekly Limit Remaining\t100%\t2026-08-11T18:50:23Z
+
+    i.e. family, limit name, remaining share, reset time. We group by family in
+    first-seen order and keep the remaining share, dropping the reset timestamps —
+    they are the least useful column in a one-line status row.
+
+    A family whose remaining share has hit 0% is reported NOT ok: every call
+    against it will fail until the window resets, which is exactly the kind of
+    thing this tool exists to surface before the user spends a call finding out.
+    Unrecognized lines are skipped rather than raising — agy's format may change
+    again, and a status probe must never be the thing that breaks.
+    """
+    families: dict[str, list[tuple[str, str]]] = {}
+    for line in stdout.splitlines():
+        fields = [f.strip() for f in line.split("\t")]
+        if len(fields) < 3 or not fields[0] or not fields[2]:
+            continue
+        limit = fields[1].removesuffix(" Remaining").removesuffix(" Limit")
+        families.setdefault(fields[0], []).append((limit or fields[1], fields[2]))
+    rows: list[tuple[str, bool, str]] = []
+    for family, limits in families.items():
+        detail = ", ".join(f"{name} {value}" for name, value in limits)
+        exhausted = any(_percent_remaining(v) == 0.0 for _, v in limits)
+        rows.append((f"quota: {family}", not exhausted, detail))
+    return rows
+
+
+def _quota_status_rows() -> list[tuple[str, bool, str]]:
+    """Quota rows for _collect_status: agy's own /usage table, or nothing.
+
+    Returns [] on agy older than 1.1.11, which has no free way to report quota (see
+    supports_print_usage) — there is nothing to say, and inventing a failing row
+    would flip the overall verdict to PROBLEMS FOUND on a perfectly healthy setup.
+    Where the command exists but the read fails, we say so in an ok row: the probe
+    is a nicety, and its failure is not a broken bridge.
+    """
+    if not supports_print_usage():
+        return []
+    out = _read_agy_usage()
+    rows = _parse_usage_rows(out) if out else []
+    return rows or [("quota", True, 'unreadable (`agy -p "/usage"` failed)')]
 
 
 def _parse_json_result(stdout: str) -> Optional[dict]:
@@ -1314,6 +1516,42 @@ _AGY_MODELS_CACHE: Optional[list[str]] = None
 _AGY_MODELS_LOCK = threading.Lock()
 
 
+def _parse_models_output(stdout: str) -> list[str]:
+    """Slugs from `agy models` stdout — the first field of each line.
+
+    agy 1.1.12 made the subcommand machine-readable and its lines are now
+    TAB-SEPARATED records, `<slug>\\t<human label>`:
+
+        gemini-3.6-flash-high\tGemini 3.6 Flash (High)
+
+    where 1.1.8 printed the bare slug. Reading the whole line as the slug
+    therefore rejected EVERY valid model, silently killing the `model` argument on
+    all three antigravity tools — verified live on 1.1.12 through this bridge:
+    antigravity_ask(model="gemini-3.6-flash-high") raised "unknown agy model
+    'gemini-3.6-flash-high'; expected one of: gemini-3.6-flash-high<TAB>Gemini 3.6
+    Flash (High), ...", an error listing the very slug it had just refused. Keeping
+    only the first field reads both formats: a bare-slug line has no tab and
+    survives unchanged.
+
+    Fields that contain whitespace are dropped: a slug never has a space, so such
+    a line is chatter (a progress or status line), not a model. 1.1.12 also moved
+    "Fetching available models..." off stdout onto stderr, so on this version the
+    guard costs nothing — it is there for the older/newer builds that print it.
+
+    (1.1.12's changelog advertises `--output-format json` for the `models` and
+    `agents` subcommands, but the shipped 1.1.12 binary has no such flag: `agy
+    models --output-format json` exits 1 with "flags provided but not defined:
+    -output-format", and `agy models --help` lists only -h/--help. TSV is the only
+    machine-readable form the subcommand actually has, so we parse it.)
+    """
+    slugs: list[str] = []
+    for line in stdout.splitlines():
+        slug = line.split("\t", 1)[0].strip()
+        if slug and not any(c.isspace() for c in slug):
+            slugs.append(slug)
+    return slugs
+
+
 def list_agy_models() -> list[str]:
     """Model slugs reported by `agy models`, cached for the process ([] if unreadable).
 
@@ -1322,6 +1560,9 @@ def list_agy_models() -> list[str]:
     stdin). Any failure (agy missing, non-zero exit, timeout) yields [], which
     callers treat as "can't validate" and pass a requested label through unchecked
     rather than wrongly rejecting it.
+
+    Line parsing lives in _parse_models_output, which tracks agy 1.1.12's switch to
+    tab-separated `<slug>\\t<label>` records.
     """
     global _AGY_MODELS_CACHE
     with _AGY_MODELS_LOCK:
@@ -1338,7 +1579,7 @@ def list_agy_models() -> list[str]:
                 **_spawn_kwargs(),
             )
             if proc.returncode == 0:
-                names = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+                names = _parse_models_output(proc.stdout or "")
         except (OSError, subprocess.SubprocessError):
             names = []
         _AGY_MODELS_CACHE = names
@@ -2971,11 +3212,14 @@ def antigravity_status() -> str:
 
     Reports the bridge's own version and whether a newer release is available
     (best-effort GitHub check; honors AGY_BRIDGE_NO_UPDATE_CHECK), then checks
-    whether agy is on PATH (and its version/compat), whether agy's state
-    directories exist, whether the newest conversation transcript is readable,
-    and whether the SQLite conversation store is present. Use this to debug empty
-    or failed responses — or to see if the bridge itself is out of date — before
-    spending quota.
+    whether agy is on PATH (and its version/compat), how much AI Pro quota is left
+    per model family (agy 1.1.11+ answers `/usage` in print mode for free — a
+    family at 0% is reported as a problem, since every call against it will fail
+    until its window resets), whether agy's state directories exist, whether the
+    newest conversation transcript is readable, and whether the SQLite
+    conversation store is present. Use this to debug empty or failed responses —
+    or to see if the bridge itself is out of date, or if you are simply out of
+    quota — before spending quota.
     """
     rows = _collect_status()
     width = max(len(label) for label, _, _ in rows)
