@@ -32,6 +32,15 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
 ]
+# tools/capture_watch_gif.py only — records the README watch GIFs. Deliberately
+# not in `dev`: it pulls Playwright, whose `playwright install chromium` step is a
+# browser download nobody running the test suite needs. Unversioned on purpose —
+# the script touches only long-stable PIL.Image / sync_playwright APIs, so a floor
+# here would be an invented claim rather than a tested one.
+assets = [
+    "pillow",
+    "playwright",
+]
 
 [project.scripts]
 agent-intern = "server:main"

@@ -6,8 +6,8 @@ the real window would show, screenshots it on a timer, and assembles the frames
 into an optimized GIF. The on-screen popup windows are suppressed (the launchers
 are monkeypatched to no-ops) — Playwright *is* the viewer.
 
-Capture-only deps (not runtime deps of the bridge):
-    uv pip install playwright Pillow && python -m playwright install chromium
+Capture-only deps (not runtime deps of the bridge), declared as the `assets` extra:
+    pip install -e ".[assets]" && python -m playwright install chromium
 
 Usage:
     python tools/capture_watch_gif.py ask    assets/watch-ask.gif
