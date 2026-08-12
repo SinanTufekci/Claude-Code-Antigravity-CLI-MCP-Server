@@ -10,6 +10,57 @@ summary.
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-08-12
+
+A packaging release: **no runtime behaviour changes**, nothing about how the bridge drives
+agy/codex/copilot/cursor is different. It exists because the fix below only reaches anyone
+once it is published.
+
+Prompted by reviewing the [2026-07-28 MCP specification](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+against this server. The spec itself is a non-event here — the breaking changes (sessions,
+the `initialize` handshake, SSE resumability) all live in the Streamable HTTP transport,
+this server speaks stdio where `server/discover` is defined as a backwards-compatibility
+probe, and the newly deprecated Roots / Sampling / Logging features were never used (the
+only `Context` method called is `report_progress`). The review did surface one real hazard,
+below.
+
+### Fixed
+
+- **`fastmcp>=2.0.0` had no upper bound, so a stable fastmcp 4 would have silently become
+  what every fresh install resolves to.** fastmcp 4 targets the 2026-07-28 spec: it drops
+  the 3.x compatibility shims and removes server-side sampling/roots. CI installs unpinned
+  (`pip install -e ".[dev]"`), so the breakage would have arrived with no commit of ours in
+  between — a green suite one day, an import error the next. Now capped at `<4`. The cap is
+  deliberate rather than a `<5` formality: 4.x is exactly the release to opt into after
+  verification, not to drift onto. Resolves to fastmcp 3.4.7 today (up from 3.4.2), verified
+  across the full ubuntu/macos/windows × py3.10–3.13 matrix.
+
+  The `>=2.0.0` floor is left alone. CI has always resolved the newest fastmcp, so 2.x has
+  never actually been exercised — narrowing it is a separate question that deserves its own
+  verification rather than a guess.
+
+### Added
+
+- **An `assets` optional extra** declaring `tools/capture_watch_gif.py`'s dependencies
+  (Pillow, Playwright). The script — which records the watch-mode GIFs in the README —
+  imports both, but neither appeared anywhere in `pyproject.toml`; they survived only as
+  hand-installed strays in whichever environment last recorded the GIFs, and any reconcile
+  against the declared dependencies removed them. Kept out of `dev` on purpose: Playwright's
+  `playwright install chromium` step is a browser download that nobody running the test suite
+  needs, and CI installs `".[dev]"`.
+
+### Changed
+
+- **CI actions moved off the Node.js 20 runtime** (`actions/checkout` v4 → v7,
+  `actions/setup-python` v5 → v7, across all three workflows). Every job was annotating that
+  the runners were force-upgrading them to Node 24. Node 24 landed in checkout v5 and
+  setup-python v6, so the minimum fix stops short of current; the intervening majors were
+  checked against this repo first — checkout v6's separate credential file is unused here
+  (`release.yml` drives the `gh` CLI off `GH_TOKEN`), checkout v7's fork-PR block applies to
+  `pull_request_target`/`workflow_run` which this repo does not use, and setup-python v7 drops
+  a `pip-install` input nothing sets. `pypa/gh-action-pypi-publish` stays on `@release/v1`,
+  which is that publisher's own documented pin.
+
 ## [0.25.0] - 2026-08-11
 
 Fixes the two issues reported against 0.23.x. Both come from an assumption that held on
@@ -1017,7 +1068,8 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.1...HEAD
+[0.25.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.0...v0.23.1
