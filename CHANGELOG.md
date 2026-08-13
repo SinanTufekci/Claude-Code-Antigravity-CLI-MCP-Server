@@ -10,6 +10,106 @@ summary.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-13
+
+**Two new backends — and both are unverified.** Grok Build (xAI) and Kimi Code (Moonshot) join
+Antigravity, Codex, Copilot and Cursor, taking the server from four backends to six and from fifteen
+tools to twenty-one. Neither has ever completed an authenticated round-trip, because I hold neither
+subscription. They ship anyway, clearly labelled, because a bridge nobody can install is a bridge
+nobody can verify — and because the parts that historically break are pinned down live.
+
+**If you have a Grok or Kimi subscription, please
+[file one verification issue](https://github.com/SinanTufekci/agent-intern/issues/new?template=backend_verification.yml).**
+Even a single confirmed checkbox closes a gap I cannot close myself.
+
+### Added
+
+- **🧪 Grok Build backend** (`grok_ask`, `grok_continue`, `grok_status`), bridging xAI's
+  [Grok Build](https://docs.x.ai/build/overview) CLI, plus **full `agent_swarm` and watch-mode
+  support** — the first experimental backend to get either.
+
+  Its flag surface is on unusually firm ground for an unverified bridge: grok-build is
+  [open source](https://github.com/xai-org/grok-build), so every flag was read off the real clap
+  definitions in `crates/codegen/xai-grok-pager/src/app/cli.rs`, confirmed against a live
+  `grok --help`, and then **every argv the bridge can construct was executed against grok 1.0.3 and
+  observed to parse** (all three sandbox modes, `-r`, `-c`, `-m`, and the streaming form). What
+  stopped is the auth wall, not a flag error.
+
+  Design notes:
+  - **Resume is deterministic and needs no state file.** `--output-format json` returns the
+    `sessionId` alongside the answer, so the bridge pins it and resumes with `-r <id>`; when that
+    in-memory pin is gone it falls back to `-c`, grok's own "most recent session for this cwd". So
+    continue survives a server restart without ever parsing grok's opaque SQLite session store —
+    simpler than the Codex and Cursor equivalents. `-s/--session-id` is deliberately never passed:
+    on 1.0.3 it *creates* a session with a chosen UUID rather than resuming one.
+  - **Auth and model validation are free.** `grok models` answers while logged out (exit 0, printing
+    `You are not authenticated.` and the catalogue), so it serves as both the auth probe and the
+    model list at no quota cost. This matters more than it sounds: grok checks **auth before it
+    validates `--sandbox` or `-m`**, so an unvalidated typo would surface as a misleading
+    "Not signed in". The bridge therefore validates both client-side.
+  - **Update suppression uses `GROK_DISABLE_AUTOUPDATER=1`, not `--no-auto-update`.** That flag is
+    `hide = true` in grok's clap definition and absent from `--help`; betting every call on an
+    undocumented flag is how a silent CLI update takes the whole bridge down. An unknown env var is
+    merely ignored.
+  - **A `PATH`-miss fallback to `~/.grok/bin`.** grok's installer appends its directory to the *user*
+    PATH, and that change never reaches an already-running MCP server — so a bare `which` lookup
+    would fail for exactly the user who just installed it.
+  - **No `GROK_HOME` isolation in swarm workers**, unlike the agy ones. grok mints a fresh session per
+    headless run (verified: concurrent `grok -p` calls don't deadlock on `~/.grok`'s locks), and
+    isolating `GROK_HOME` would *hide* `auth.json`, which lives inside it — issue #2's failure mode,
+    on every platform rather than just macOS.
+
+  ⚠️ **Sandbox caveat.** Grok is the only backend besides Codex with a real OS sandbox, but it is
+  Landlock (Linux) and Seatbelt (macOS) only; xAI's docs state that where it cannot be applied grok
+  "logs a warning and continues without enforcement" — i.e. **on Windows `--sandbox read-only` is
+  silently unenforced**. So `read-only` also passes a `--tools` allowlist
+  (`read_file,list_dir,grep,glob,web_search,web_fetch`) and `--no-subagents`, which are agent-enforced
+  and hold everywhere. An allowlist rather than a denylist deliberately: a future grok that adds a
+  write tool then fails safe. Every mode passes `--always-approve`, because grok's headless mode does
+  *not* self-approve (unlike agy and Kimi) and no human is present to answer a prompt.
+
+- **🌙 Kimi Code backend** (`kimi_ask`, `kimi_continue`, `kimi_status`), bridging Moonshot's
+  [Kimi Code](https://github.com/MoonshotAI/kimi-code) CLI (Kimi K2 family). Verified as far as an
+  unauthenticated kimi 0.29.1 allows: the flag surface, that `-p` **rejects** `--auto` and `--yolo`
+  (print mode already self-approves, so the bridge passes neither), the logged-out failure
+  (exit 1, `No model configured`), and the `~/.kimi-code/` layout. Continue uses Kimi's per-directory
+  `-c`, so there is no id to capture and no restart problem. `model` is a lenient pass-through —
+  Kimi has no `models` command, and aliases are user-defined in `config.toml`.
+
+  **`agent_swarm` and watch support are deliberately scoped out** until a live round-trip confirms
+  Kimi's `stream-json` envelope. Stacking an unverified dependency on an unverified backend produces
+  two bugs that mask each other.
+
+  ⚠️ **Kimi has no sandbox and no `sandbox` argument.** Print mode auto-executes every tool call with
+  no approval gate — the same posture as agy. Trusted prompts on trusted content only.
+
+- **A verification issue template**
+  ([`backend_verification.yml`](.github/ISSUE_TEMPLATE/backend_verification.yml)) turning "please test
+  this" into a checklist of the specific unproven claims, so a reporter can tick what they actually
+  observed and skip the rest. The first box — *a fresh ask returned a real answer* — is the one that
+  matters most, and takes about a minute.
+
+- **110 new offline tests** (88 in `test_grok.py`, 22 in `test_kimi.py`), both wired into CI. They pin the argv
+  the bridges build and the response shapes they parse; the argv half is live-verified, and the
+  parsing half is precisely what a community report will confirm or refute. Suite total: 607 passing.
+
+### Changed
+
+- **The server's MCP instructions now name six backends**, flag the two experimental ones explicitly,
+  and tell the host model to run their `*_status` first and report a failure plainly rather than
+  retrying blindly — the routing guidance a model can't infer from tool schemas.
+- **The swarm's backend badge lookup is data-driven** (`BACKEND_BADGES`) instead of a ternary chain,
+  so adding a backend no longer means editing the same expression in two embedded HTML pages.
+- **`agent_swarm`'s unknown-backend error now lists the valid backends from one constant**, rather
+  than a hand-maintained sentence that had to be edited in lockstep.
+
+### Notes
+
+- **xAI's headless docs are already stale on 1.0.3.** They use `-m grok-build` in their examples; the
+  live default model is `grok-4.5`, and `grok-build` is not in `grok models` output at all. Recorded
+  because it is a fair warning about what else in those docs may not match the shipped binary — the
+  same class of drift that has broken the agy backend twice.
+
 ## [0.25.1] - 2026-08-12
 
 A packaging release: **no runtime behaviour changes**, nothing about how the bridge drives
@@ -1068,7 +1168,8 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.1...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.23.1...v0.24.0

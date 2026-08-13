@@ -422,6 +422,8 @@ from fastmcp import Context, FastMCP
 import codex_bridge
 import copilot_bridge
 import cursor_bridge
+import grok_bridge
+import kimi_bridge
 
 # Server-level instructions. The MCP client sends these to its model on connect
 # (Claude Code surfaces them as an "MCP Server Instructions" block), so EVERY
@@ -432,11 +434,11 @@ import cursor_bridge
 # value content here is what a model can't infer from tool schemas alone —
 # proactive triggers, which backend to pick, and the workspace footgun.
 SERVER_INSTRUCTIONS = """\
-This server bridges four external coding CLIs — Antigravity (Gemini), OpenAI \
-Codex, GitHub Copilot, and Cursor — into your session as sub-agents that run on \
-the USER'S OWN quota. Delegating here spends their Gemini/Codex/Copilot/Cursor \
-quota instead of your tokens, gets a second model-family opinion, or generates \
-images.
+This server bridges six external coding CLIs — Antigravity (Gemini), OpenAI \
+Codex, GitHub Copilot, Cursor, and the two EXPERIMENTAL ones, Grok Build (xAI) \
+and Kimi Code (Moonshot) — into your session as sub-agents that run on the \
+USER'S OWN quota. Delegating here spends that quota instead of your tokens, gets \
+a second model-family opinion, or generates images.
 
 Reach for these tools when:
 - the user wants an IMAGE — antigravity_image is your only image generator \
@@ -459,6 +461,14 @@ not an OS boundary.
 - cursor_* (Cursor) — agentic coding on a Cursor plan, with a wide model menu \
 (GPT/Claude/Grok/Composer via `model`); sandbox is agent-enforced (read-only = \
 ask mode), not an OS boundary.
+- grok_* (Grok Build, xAI — EXPERIMENTAL, never live-verified) — needs SuperGrok \
+/ X Premium+ or XAI_API_KEY. Real OS sandbox, but on LINUX/macOS ONLY: on Windows \
+it silently does not enforce, so read-only there rests on a tool allowlist.
+- kimi_* (Kimi Code, Moonshot — EXPERIMENTAL, never live-verified) — Kimi K2 \
+family; like antigravity it has NO sandbox and auto-executes tools, so trusted \
+prompts only. Needs `kimi login` or an API key.
+Both experimental backends are unproven end-to-end: run their *_status first, and \
+tell the user plainly if one fails rather than retrying blindly.
 
 Mechanics:
 - Pass `workspace` = the relevant project directory. It defaults to the server's \
@@ -471,8 +481,9 @@ value).
 - *_status checks a backend is installed and logged in, and spends no quota — \
 use it if a call reports "not found".
 
-Security: all three run as autonomous agents and only Codex's sandbox is a hard \
-boundary. Use only with trusted prompts on trusted content."""
+Security: they all run as autonomous agents. Codex's sandbox is the only hard \
+boundary everywhere; grok's is a real one too, but only on Linux/macOS. Use only \
+with trusted prompts on trusted content."""
 
 mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 
@@ -480,7 +491,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.25.1"
+__version__ = "0.26.0"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -3126,9 +3137,9 @@ def agent_swarm(
     """Run SEVERAL tasks IN PARALLEL across ALL backends in a single swarm.
 
     Each task is its own worker and names the backend to run on, so one swarm can
-    mix Antigravity (Gemini), Codex, Copilot, and Cursor workers — they run truly
-    concurrently (capped at `max_concurrency`) and every answer comes back in one
-    labelled block. A worker that fails is reported in place; the others still
+    mix Antigravity (Gemini), Codex, Copilot, Cursor, and Grok workers — they run
+    truly concurrently (capped at `max_concurrency`) and every answer comes back in
+    one labelled block. A worker that fails is reported in place; the others still
     return.
 
     SECURITY: this launches N unsandboxed agents at once — N times the
@@ -3138,19 +3149,21 @@ def agent_swarm(
     Args:
         tasks: One object per parallel worker:
                - backend: "antigravity" (alias "agy"/"gemini"), "codex",
-                          "copilot" (alias "gh"/"github"), or "cursor" (required)
+                          "copilot" (alias "gh"/"github"), "cursor", or "grok"
+                          (alias "xai"; EXPERIMENTAL — see grok_ask) (required)
                - prompt:  the question or instruction (required)
                - workspace: working dir for that worker (default: server cwd)
-               - sandbox: Codex/Copilot/Cursor only — "read-only" (default),
+               - sandbox: Codex/Copilot/Cursor/Grok only — "read-only" (default),
                           "workspace-write", or "danger-full-access". Ignored for
-                          Antigravity. (Codex's is an enforced OS sandbox; Copilot's
-                          and Cursor's are agent/tool-level, not OS boundaries — see
-                          copilot_ask / cursor_ask.)
+                          Antigravity. (Codex's is an enforced OS sandbox
+                          everywhere; Grok's is enforced on Linux/macOS only;
+                          Copilot's and Cursor's are agent/tool-level, not OS
+                          boundaries — see copilot_ask / cursor_ask / grok_ask.)
                - model:   optional model override for ANY backend — Codex's `-m`,
-                          Copilot's/Cursor's `--model`, or Antigravity's `--model`
-                          (an agy slug like "claude-sonnet-4-6"; validated
-                          against each backend's model list). Omit for each
-                          backend's default.
+                          Copilot's/Cursor's `--model`, Grok's `-m`, or
+                          Antigravity's `--model` (an agy slug like
+                          "claude-sonnet-4-6"; validated against each backend's
+                          model list). Omit for each backend's default.
         max_concurrency: Max workers running at once (default 4). Higher = faster
                          but more quota/rate-limit pressure and more agents at once.
         timeout_s: Per-worker timeout in seconds. Default 180.
@@ -3904,6 +3917,356 @@ def _run_cursor_watched(
         raise
     _watch_finish(rid, "done", answer, time.time() - start)
     return answer
+
+
+# ============================================================ Grok tools
+# EXPERIMENTAL — see grok_bridge's module docstring. The flag surface below is
+# live-verified on grok 1.0.3; the ANSWER path behind grok's auth wall is not.
+@mcp.tool(
+    annotations={
+        "title": "Ask Grok Build (new session) [experimental]",
+        "readOnlyHint": False,  # grok may edit files / run commands per sandbox
+        "idempotentHint": False,
+        "openWorldHint": True,  # talks to the external xAI service
+    }
+)
+async def grok_ask(
+    prompt: str,
+    workspace: Optional[str] = None,
+    sandbox: str = grok_bridge.DEFAULT_SANDBOX,
+    model: Optional[str] = None,
+    timeout_s: int = 180,
+    watch: bool = False,
+    ctx: Optional[Context] = None,
+) -> str:
+    """Ask Grok Build (`grok -p`) a question or task in a NEW session. EXPERIMENTAL.
+
+    ⚠️ Community-verified only: this bridge has never completed an authenticated
+    round-trip, because the author has no Grok subscription. Its flags are verified
+    against grok 1.0.3, but the answer path is not. If it misbehaves, say so rather
+    than working around it — and please report it.
+
+    Needs a SuperGrok / X Premium+ login (`grok login`) or an XAI_API_KEY env var;
+    run `grok_status` first to check. Returns the agent's final message, read from
+    grok's `--output-format json` result. Point `workspace` at a project dir for
+    context-aware answers.
+
+    Args:
+        prompt: Question or instruction for Grok.
+        workspace: Working root (`--cwd`). Defaults to the server cwd.
+        sandbox: Permission policy (maps to grok's `--sandbox` profile plus a tool
+                 allowlist): "read-only" (default — the `read-only` profile, no
+                 write/shell tools, no subagents), "workspace-write" (the
+                 `workspace` profile: writes land in the workspace, ~/.grok and
+                 temp), or "danger-full-access" (profile `off` — avoid).
+                 ⚠️ grok's OS sandbox is LINUX/macOS ONLY (Landlock/Seatbelt); on
+                 Windows it is silently NOT enforced, so read-only there rests on
+                 the agent-enforced tool allowlist alone. For a hard boundary on
+                 every platform, use codex.
+        model: Optional model override (`-m`, e.g. "grok-4.5"); validated against
+               `grok models` and rejected on a typo. Omit to use grok's default.
+        timeout_s: Max seconds to wait for grok to complete. Default 180.
+        watch: If true, open a live "watch" view streaming grok's steps from its
+               `--output-format streaming-json` event stream. Same final text is
+               returned. Best-effort. Default false.
+    """
+    ws = grok_bridge.normalize_workspace(workspace)
+    grok_bridge.validate_sandbox(sandbox)  # fail fast (grok checks auth first)
+    grok_bridge.validate_model(model)  # fail fast on a typo (grok models)
+    if watch:
+        return await asyncio.to_thread(
+            _run_grok_watched, prompt, ws, sandbox, model, False, timeout_s
+        )
+    return await _run_with_progress(
+        grok_bridge.run_grok,
+        (prompt, ws, sandbox, model, False, timeout_s),
+        ctx,
+        timeout_s,
+        label="grok",
+    )
+
+
+@mcp.tool(
+    annotations={
+        "title": "Continue Grok Build session [experimental]",
+        "readOnlyHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def grok_continue(
+    prompt: str,
+    workspace: Optional[str] = None,
+    sandbox: str = grok_bridge.DEFAULT_SANDBOX,
+    timeout_s: int = 180,
+    watch: bool = False,
+    ctx: Optional[Context] = None,
+) -> str:
+    """Continue the Grok session rooted at this workspace. EXPERIMENTAL.
+
+    Resumes the exact session id grok returned on the last grok_ask in this
+    workspace (`-r <id>`), falling back to grok's own "most recent session for this
+    cwd" (`-c`) when that in-memory pin is gone — so it still works after a server
+    restart. grok applies permission flags per invocation, so `sandbox` takes effect
+    here too: analyze read-only with grok_ask, then continue with "workspace-write"
+    to apply the fix. Same experimental caveat and auth requirement as grok_ask.
+
+    Args:
+        prompt: Follow-up message for the existing session.
+        workspace: Working root used by the prior session. Defaults to the server cwd.
+        sandbox: Permission policy for THIS turn (default "read-only"). Same values
+                 and platform caveats as grok_ask.
+        timeout_s: Max seconds to wait for grok to complete. Default 180.
+        watch: If true, open the live "watch" view streaming grok's steps
+               (same viewer as grok_ask). Default false.
+    """
+    ws = grok_bridge.normalize_workspace(workspace)
+    grok_bridge.validate_sandbox(sandbox)
+    if watch:
+        return await asyncio.to_thread(
+            _run_grok_watched, prompt, ws, sandbox, None, True, timeout_s
+        )
+    return await _run_with_progress(
+        grok_bridge.run_grok,
+        (prompt, ws, sandbox, None, True, timeout_s),
+        ctx,
+        timeout_s,
+        label="grok",
+    )
+
+
+@mcp.tool(
+    annotations={
+        "title": "Grok bridge diagnostics",
+        "readOnlyHint": True,  # only runs `grok --version`/`models` + reads local state
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+def grok_status() -> str:
+    """Report diagnostics for the Grok Build bridge setup (spends no quota).
+
+    Reports the bridge's own version and any newer release (the same update notice
+    antigravity_status shows), then whether `grok` is found (and its version),
+    whether you're authenticated, which models it offers, and where grok keeps its
+    data. Auth and the model list both come from `grok models`, which answers even
+    when logged out — so this is cheap and safe to call first.
+
+    Use this to debug "grok not found" or auth errors before spending quota. This
+    backend is EXPERIMENTAL and unverified end-to-end, so a green status here means
+    the setup looks right, not that a live answer has ever been confirmed.
+    """
+    rows = [_bridge_version_status()] + grok_bridge.status_rows()
+    width = max(len(label) for label, _, _ in rows)
+    lines = ["grok bridge status  (EXPERIMENTAL — community-verified only)"]
+    for label, ok, detail in rows:
+        mark = "ok" if ok else "!!"
+        lines.append(f"  {label.ljust(width)}  [{mark}] {detail}")
+    lines.append("Overall: " + ("OK" if all(ok for _, ok, _ in rows) else "PROBLEMS FOUND"))
+    return "\n".join(lines)
+
+
+def _grok_tool_line(ev: dict) -> str:
+    """A short, human-readable line for a grok `tool_call` event.
+
+    grok's ACP-derived tool_call carries `toolName` plus a `rawInput` object and a
+    human `title`. Prefer a command/path-like input field, then the title, then the
+    tool name.
+    """
+    raw = ev.get("rawInput")
+    if isinstance(raw, dict):
+        for f in ("command", "path", "file_path", "pattern", "query", "url", "target_file"):
+            v = raw.get(f)
+            if isinstance(v, str) and v.strip():
+                return v.strip().splitlines()[0]
+    for f in ("title", "toolName"):
+        v = ev.get(f)
+        if isinstance(v, str) and v.strip():
+            return v.strip().splitlines()[0]
+    return ""
+
+
+def _grok_event_to_watch_lines(ev: dict) -> list[tuple[str, str]]:
+    """Map one grok streaming-json event to (kind, text) watch lines
+    (kind is 'narration' | 'command' | 'result'), mirroring
+    _cursor_event_to_watch_lines. Returns [] for events not worth showing.
+    """
+    etype = ev.get("type")
+    if etype in ("text", "thought"):
+        data = ev.get("data")
+        if isinstance(data, str) and data.strip():
+            return [("narration", data.strip().splitlines()[0][:200])]
+        return []
+    if etype == "tool_call":
+        line = _grok_tool_line(ev)
+        return [("command", line[:200])] if line else []
+    if etype == "tool_call_update":
+        if ev.get("status") == "completed":
+            return [("result", "done")]
+        if ev.get("status") == "failed":
+            return [("result", "failed")]
+        return []
+    if etype == "error":
+        return [("result", f"error: {ev.get('message') or ''}"[:200])]
+    return []
+
+
+def _run_grok_watched(
+    prompt: str,
+    workspace: str,
+    sandbox: str,
+    model: Optional[str],
+    continue_conv: bool,
+    timeout_s: int,
+) -> str:
+    """Like grok_bridge.run_grok, but stream grok's steps to the live watch window.
+
+    EXPERIMENTAL twice over: the watch viewer is best-effort, and grok's
+    streaming-json event shapes are docs-derived (never observed on a real answer).
+    Unknown events simply render nothing. Return value is identical to grok_ask.
+    """
+    start = time.time()
+    title = prompt.strip().splitlines()[0] if prompt.strip() else ""
+    if len(title) > 200:
+        title = title[:200].rsplit(" ", 1)[0] + "…"
+    history = grok_bridge.read_history(workspace, continue_conv)
+    rid = _watch_begin(title, start, timeout_s, backend="grok", prompt=prompt, history=history)
+    try:
+        port = _ensure_watch_server()
+        _open_watch_window(_watch_url(port, rid), rid)
+    except Exception:  # noqa: BLE001 — the viewer is best-effort, never fatal
+        pass
+
+    def on_event(ev: dict) -> None:
+        watch_lines = _grok_event_to_watch_lines(ev)
+        if watch_lines:
+            t = round(time.time() - start, 1)
+            _watch_append(rid, [{"kind": k, "text": x, "t": t} for k, x in watch_lines])
+
+    try:
+        answer = grok_bridge.run_grok_streaming(
+            prompt, workspace, sandbox, model, continue_conv, timeout_s, on_event
+        )
+    except Exception as e:  # noqa: BLE001 — show the failure in the window, then re-raise
+        _watch_finish(rid, "error", f"({e})"[:200], time.time() - start)
+        raise
+    _watch_finish(rid, "done", answer, time.time() - start)
+    return answer
+
+
+# ============================================================ Kimi tools
+# EXPERIMENTAL — see kimi_bridge's module docstring. Verified only as far as an
+# unauthenticated kimi 0.29.1 allows; deliberately no swarm/watch support until a
+# live round-trip confirms kimi's stream-json envelope.
+@mcp.tool(
+    annotations={
+        "title": "Ask Kimi (new session) [experimental]",
+        "readOnlyHint": False,  # kimi print mode auto-executes tools (no sandbox)
+        "idempotentHint": False,
+        "openWorldHint": True,  # talks to the external Moonshot/Kimi service
+    }
+)
+async def kimi_ask(
+    prompt: str,
+    workspace: Optional[str] = None,
+    model: Optional[str] = None,
+    timeout_s: int = 180,
+    ctx: Optional[Context] = None,
+) -> str:
+    """Ask Kimi Code (`kimi -p`) a question or task in a NEW session. EXPERIMENTAL.
+
+    ⚠️ Community-verified only — built without a Kimi account, so no authenticated
+    round-trip has ever run and the author cannot verify it. It won't answer until
+    you authenticate: run `kimi login` (device-code) or put an API key in
+    ~/.kimi-code/config.toml, then check `kimi_status`. Returns the agent's final
+    message, read straight from stdout. Kimi Code is Moonshot's terminal coding
+    agent (Kimi K2 family); point `workspace` at a project dir for context-aware
+    answers.
+
+    Kimi print mode has NO sandbox and auto-executes every tool call (like
+    antigravity), so run it only with trusted prompts on trusted content.
+
+    Args:
+        prompt: Question or instruction for Kimi.
+        workspace: Working root (kimi's cwd). Defaults to the server cwd.
+        model: Optional model alias (`-m`, from ~/.kimi-code/config.toml); omit to
+               use config's default_model. Not validated up front (Kimi has no
+               `models` list), so a bad alias surfaces as Kimi's own run-time error.
+        timeout_s: Max seconds to wait for kimi to complete. Default 180.
+    """
+    ws = kimi_bridge.normalize_workspace(workspace)
+    model = kimi_bridge.validate_model(model)
+    return await _run_with_progress(
+        kimi_bridge.run_kimi,
+        (prompt, ws, model, False, timeout_s),
+        ctx,
+        timeout_s,
+        label="kimi",
+    )
+
+
+@mcp.tool(
+    annotations={
+        "title": "Continue Kimi session [experimental]",
+        "readOnlyHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+)
+async def kimi_continue(
+    prompt: str,
+    workspace: Optional[str] = None,
+    timeout_s: int = 180,
+    ctx: Optional[Context] = None,
+) -> str:
+    """Continue the Kimi session rooted at this workspace (`kimi -c`). EXPERIMENTAL.
+
+    Resumes the previous Kimi session for this workspace via `-c/--continue` — Kimi
+    scopes sessions per working directory, so there's no id to track. Errors if no
+    prior kimi_ask ran in this workspace. Same experimental caveat and auth
+    requirement as kimi_ask.
+
+    Args:
+        prompt: Follow-up message for the existing session.
+        workspace: Working root used by the prior session. Defaults to the server cwd.
+        timeout_s: Max seconds to wait for kimi to complete. Default 180.
+    """
+    ws = kimi_bridge.normalize_workspace(workspace)
+    return await _run_with_progress(
+        kimi_bridge.run_kimi,
+        (prompt, ws, None, True, timeout_s),
+        ctx,
+        timeout_s,
+        label="kimi",
+    )
+
+
+@mcp.tool(
+    annotations={
+        "title": "Kimi bridge diagnostics",
+        "readOnlyHint": True,  # only runs `kimi --version`/`provider list` + reads local state
+        "idempotentHint": True,
+        "openWorldHint": False,
+    }
+)
+def kimi_status() -> str:
+    """Report diagnostics for the Kimi bridge setup (spends no quota). EXPERIMENTAL.
+
+    Reports the bridge's own version and any newer release (same update notice
+    antigravity_status shows), then checks whether `kimi` is found (and its
+    version), whether a provider is configured (`kimi provider list` — the auth
+    proxy, since Kimi needs `kimi login` or an API key in config.toml), and where
+    Kimi stores its data. This backend is unverified, so expect the auth row to say
+    "no providers configured" until you log in.
+    """
+    rows = [_bridge_version_status()] + kimi_bridge.status_rows()
+    width = max(len(label) for label, _, _ in rows)
+    lines = ["kimi bridge status  (EXPERIMENTAL — community-verified only)"]
+    for label, ok, detail in rows:
+        mark = "ok" if ok else "!!"
+        lines.append(f"  {label.ljust(width)}  [{mark}] {detail}")
+    lines.append("Overall: " + ("OK" if all(ok for _, ok, _ in rows) else "PROBLEMS FOUND"))
+    return "\n".join(lines)
 
 
 def main() -> None:

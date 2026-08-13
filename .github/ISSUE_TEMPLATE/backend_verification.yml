@@ -1,0 +1,122 @@
+name: Verify an experimental backend (Grok Build / Kimi Code)
+description: You have a Grok or Kimi subscription and can confirm (or disprove) that the bridge actually works.
+title: "verify: <grok|kimi> <cli version> on <OS>"
+labels: ["verification", "help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Thank you — this is the single most useful thing you can contribute.**
+
+        The Grok Build and Kimi Code backends ship EXPERIMENTAL because I don't
+        have a subscription for either, so no authenticated round-trip has ever
+        run against them. Everything up to each CLI's auth wall is verified live
+        (flag surface, error shapes, model list, on-disk layout); everything
+        *behind* it is derived from the vendor's docs and could be wrong.
+
+        You don't have to do all of this. **Even one checked box helps** — the
+        first one especially. Report what you tried, including partial results,
+        and paste the errors verbatim if something breaks.
+
+        Nothing here needs a private repo: a scratch directory with one or two
+        files is plenty, and `read-only` is the default everywhere.
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Which backend
+      options:
+        - Grok Build (grok)
+        - Kimi Code (kimi)
+    validations:
+      required: true
+
+  - type: input
+    id: cli-version
+    attributes:
+      label: CLI version
+      description: "`grok --version` or `kimi --version`."
+      placeholder: "grok 1.0.3 (1a29d5bc12)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: bridge-version
+    attributes:
+      label: Bridge version
+      description: "`pip show agent-intern`, or the release tag you installed."
+      placeholder: "0.26.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: status-output
+    attributes:
+      label: Status output
+      description: |
+        Paste the full output of the `grok_status` / `kimi_status` tool. This
+        spends no quota and is the fastest way to tell a setup problem from a
+        bridge bug.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: verified
+    attributes:
+      label: What actually worked
+      description: Tick only what you personally observed. Leave the rest blank.
+      options:
+        - label: "**A fresh ask returned a real answer** (`grok_ask` / `kimi_ask`) — the one that matters most"
+        - label: "Continue preserved context (`grok_continue` / `kimi_continue` recalled something from the first turn)"
+        - label: "Continue still worked after restarting the MCP server (this exercises the fallback path, not the in-memory pin)"
+        - label: "A `model` override was accepted and visibly used"
+        - label: "`sandbox=\"workspace-write\"` actually edited a file (Grok only)"
+        - label: "`sandbox=\"read-only\"` REFUSED to edit a file (Grok only — please say which OS, this is enforced differently per platform)"
+        - label: "`watch=true` opened the live view and showed real steps (Grok only)"
+        - label: "`agent_swarm` ran 2+ `grok` workers in parallel and all returned (Grok only)"
+
+  - type: textarea
+    id: broke
+    attributes:
+      label: What broke
+      description: |
+        Paste errors verbatim. The most valuable failures are shape mismatches —
+        the bridge reading a field the CLI doesn't send. Those look like:
+
+        - `grok produced no JSON result on stdout` / `grok returned an empty answer`
+        - `kimi produced no output on stdout`
+        - a continue that silently starts a brand-new conversation
+
+        If you can, re-run the same prompt against the raw CLI and paste that too:
+
+        ```
+        grok -p "say hi" --output-format json
+        kimi -p "say hi" --output-format text
+        ```
+
+        That one command separates "the bridge is wrong" from "the CLI changed",
+        which is the distinction I can't make from here.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Timing, quota surprises, flags your CLI version has that the bridge doesn't use, docs that no longer match reality.
+    validations:
+      required: false

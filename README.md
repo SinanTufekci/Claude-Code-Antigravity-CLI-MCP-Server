@@ -1,10 +1,10 @@
 <div align="center">
 
-# Claude Code × Antigravity + Codex + Copilot + Cursor — MCP Bridge
+# Claude Code × Antigravity + Codex + Copilot + Cursor + Grok + Kimi — MCP Bridge
 
 <img src="assets/bridge-animation.svg" width="100%" alt="Claude Code bridging Google Antigravity, OpenAI Codex, GitHub Copilot, and Cursor" />
 
-**Drive four external coding CLIs — Google's [Antigravity](https://antigravity.google/) (Gemini 3.6 Flash), [OpenAI Codex](https://developers.openai.com/codex/), the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli), and [Cursor](https://cursor.com/cli) — as sub-agents inside [Claude Code](https://claude.com/claude-code). Text answers, image generation, real repo work, and parallel swarms, on quota you already pay for.**
+**Drive six external coding CLIs — Google's [Antigravity](https://antigravity.google/) (Gemini 3.6 Flash), [OpenAI Codex](https://developers.openai.com/codex/), the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli), [Cursor](https://cursor.com/cli), and the two experimental newcomers [Grok Build](https://docs.x.ai/build/overview) and [Kimi Code](https://github.com/MoonshotAI/kimi-code) — as sub-agents inside [Claude Code](https://claude.com/claude-code). Text answers, image generation, real repo work, and parallel swarms, on quota you already pay for.**
 
 [![CI](https://github.com/SinanTufekci/agent-intern/actions/workflows/ci.yml/badge.svg)](https://github.com/SinanTufekci/agent-intern/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/agent-intern?logo=pypi&logoColor=white&color=2ea44f)](https://pypi.org/project/agent-intern/)
@@ -17,6 +17,8 @@
 [![codex 0.144.1 verified](https://img.shields.io/badge/codex--cli-0.144.1%20verified-2ea44f)](https://developers.openai.com/codex/)
 [![copilot 1.0.69 verified](https://img.shields.io/badge/copilot--cli-1.0.69%20verified-2ea44f)](https://docs.github.com/en/copilot/how-tos/copilot-cli)
 [![cursor 2026.07.23 verified](https://img.shields.io/badge/cursor--agent-2026.07.23%20verified-2ea44f)](https://cursor.com/cli)
+[![grok 1.0.3 unverified](https://img.shields.io/badge/grok--build-1.0.3%20UNVERIFIED-orange)](#experimental-backends)
+[![kimi 0.29.1 unverified](https://img.shields.io/badge/kimi--code-0.29.1%20UNVERIFIED-orange)](#experimental-backends)
 [![platform](https://img.shields.io/badge/platform-Windows%20·%20macOS%20·%20Linux-lightgrey)](#requirements)
 [![Sponsor](https://img.shields.io/github/sponsors/SinanTufekci?logo=githubsponsors&label=Sponsor&color=ea4aaa)](https://github.com/sponsors/SinanTufekci)
 
@@ -24,10 +26,11 @@
 
 ---
 
-One MCP server, **four backends**. It exposes Google Antigravity, OpenAI Codex, the GitHub
-Copilot CLI, and Cursor to Claude Code as clean MCP tools so you can delegate work to a different model
-family mid-task — without leaving your terminal, and on the subscriptions you already have. Each backend
-is independent: install one, two, three, or all four.
+One MCP server, **six backends** — four verified, two experimental. It exposes Google Antigravity,
+OpenAI Codex, the GitHub Copilot CLI, Cursor, and now xAI's Grok Build and Moonshot's Kimi Code to
+Claude Code as clean MCP tools so you can delegate work to a different model family mid-task — without
+leaving your terminal, and on the subscriptions you already have. Each backend is independent: install
+one, or all six.
 
 - **🛰️ Antigravity (`agy`, Gemini 3.6 Flash High).** Fast, cheap tool-calling — and the **only**
   backend with an image model. Its headless print mode (`agy -p`) historically had a **stdout bug**:
@@ -47,10 +50,27 @@ is independent: install one, two, three, or all four.
   like Codex/Copilot (`--output-format text` prints just the answer), an **agent-enforced** sandbox
   (read-only via `--mode ask`), and a deterministic resume mechanism (the bridge mints each chat's id
   itself via `create-chat`). No image model.
+- **🧪 Grok Build (`grok -p`, xAI) — EXPERIMENTAL.** xAI's terminal coding agent, and the only backend
+  besides Codex with a **real OS sandbox** — though only on Linux/macOS. Stdout-native
+  (`--output-format json` returns the answer *and* the session id), with `-r` resume, `streaming-json`
+  for watch mode, and full swarm support. **Never verified end-to-end** — see below.
+- **🌙 Kimi Code (`kimi -p`, Moonshot) — EXPERIMENTAL.** Moonshot's terminal coding agent (Kimi K2
+  family). Stdout-native (`--output-format text`), resumes per working directory (`-c`). **No sandbox** —
+  print mode auto-executes every tool, like Antigravity. **Never verified end-to-end** — see below.
 
-All four share the same niceties: a `*_continue` to resume a thread, a [live "watch" window](#watch-mode)
+They share the same niceties: a `*_continue` to resume a thread, a [live "watch" window](#watch-mode)
 to see the agent work, a unified [`agent_swarm`](#swarm) that runs many tasks in parallel **across
-all backends at once**, and `*_status` diagnostics that spend no quota.
+all backends at once**, and `*_status` diagnostics that spend no quota. (Kimi is the one exception:
+no watch or swarm support yet — see [Experimental backends](#experimental-backends).)
+
+> [!IMPORTANT]
+> **Grok Build and Kimi Code ship unverified, and I need your help.** I don't have a Grok or Kimi
+> subscription, so no authenticated round-trip has ever run against either backend. Everything up to
+> each CLI's auth wall *is* verified live — flag surface, error shapes, model list, on-disk layout —
+> but everything behind it comes from vendor docs and could be wrong. If you have either
+> subscription, **[one issue from the verification template](https://github.com/SinanTufekci/agent-intern/issues/new?template=backend_verification.yml)
+> is the single most useful contribution you can make.** Even confirming one checkbox helps.
+> [Full detail →](#experimental-backends)
 
 > [!WARNING]
 > **This runs unsandboxed code with your privileges.** `agy -p` auto-executes its tools
@@ -61,7 +81,11 @@ all backends at once**, and `*_status` diagnostics that spend no quota.
 > **best-effort** tool/path permissions (read-only denies the local write/shell tools) — safer than
 > agy, but **not** an OS sandbox like Codex's. `cursor-agent -p` runs headless with `--trust` (and
 > `--force` for writes); its `sandbox` is **agent-enforced** (read-only = `--mode ask`, which makes the
-> write/shell tools unavailable) — best-effort like Copilot, **not** an OS sandbox. In all four cases
+> write/shell tools unavailable) — best-effort like Copilot, **not** an OS sandbox. `grok -p` runs
+> headless with `--always-approve`; its `sandbox` maps to a **real OS profile (Landlock/Seatbelt)** —
+> but **only on Linux and macOS**, and on Windows grok silently continues *without enforcement*, so
+> read-only there rests on an agent-enforced tool allowlist. `kimi -p` has **no sandbox at all** and
+> auto-executes every tool, like agy. In all six cases
 > the `workspace` argument is a *starting context*, **not** a security boundary. Only use these with **trusted prompts on trusted
 > content**; for real isolation, run the bridge inside a container or VM. **[Full details →](#security)**
 
@@ -77,9 +101,10 @@ all backends at once**, and `*_status` diagnostics that spend no quota.
 | 📁 **Cross-repo reads** | Point a worker at another project directory and let it read/answer there. |
 | 🔌 **Zero new auth** | Piggybacks the logins you already did — no keys for the bridge to manage. |
 
-## The four backends at a glance
+## The backends at a glance
 
-The bridge normalizes all four CLIs into the same shape, but they differ where it matters. Pick per task:
+The bridge normalizes every CLI into the same shape, but they differ where it matters. Pick per task.
+The four verified backends first; the [two experimental ones](#experimental-backends) follow.
 
 | | 🛰️ **Antigravity** (`agy`) | 🤖 **Codex** (`codex exec`) | 🐙 **Copilot** (`copilot -p`) | ✳️ **Cursor** (`cursor-agent -p`) |
 |---|---|---|---|---|
@@ -92,9 +117,64 @@ The bridge normalizes all four CLIs into the same shape, but they differ where i
 | **Auth** | OS credential store (AI Pro session) | `codex login` (ChatGPT account or API key) | OS credential store (`copilot login`) or a GitHub token env | `cursor-agent login` (OS credential store) or `CURSOR_API_KEY` |
 | **In a swarm** | Runs with an isolated `HOME` to avoid state races | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation | Fresh one-shot — needs no isolation |
 
+<a id="experimental-backends"></a>
+
+## 🧪 The two experimental backends — and how you can help
+
+**Grok Build** and **Kimi Code** are wired in exactly like the other four, with one honest difference:
+**no authenticated round-trip has ever run against either.** I don't have a SuperGrok / X Premium+
+subscription or a Kimi plan, so I cannot prove they answer. They ship anyway because a bridge nobody
+can install is a bridge nobody can verify — and because the parts that usually rot are already pinned
+down.
+
+**What *is* verified live** (each CLI installed, run, and observed — just never logged in):
+
+| | 🧪 **Grok Build** (`grok -p`) | 🌙 **Kimi Code** (`kimi -p`) |
+|---|---|---|
+| **Verified against** | grok 1.0.3 / Windows | kimi 0.29.1 / Windows |
+| **Flag surface** | ✅ read off the **open-source clap definitions** ([xai-org/grok-build](https://github.com/xai-org/grok-build)), then confirmed against live `grok --help`. Every argv the bridge can build was executed and **parses cleanly** | ✅ confirmed against live `kimi --help`; also that `-p` *rejects* `--auto`/`--yolo` (print mode already self-approves, so the bridge passes neither) |
+| **Auth failure mode** | ✅ exit 1 + `{"type":"error","message":"Not signed in. …"}` on stdout; no browser, no hang | ✅ exit 1 + stderr `No model configured` |
+| **Model list** | ✅ `grok models` answers *while logged out* — so auth checks and model validation cost nothing. Live default is **`grok-4.5`**, not the `grok-build` xAI's own docs still print | ⚠️ none — Kimi has no `models` command; aliases are user-defined in `config.toml`, so `model` is a lenient pass-through |
+| **On-disk layout** | ✅ `~/.grok/` (`config.toml`, `auth.json`, `sessions/`, `logs/`); `GROK_HOME` really relocates it | ✅ `~/.kimi-code/` (`config.toml`, `device_id`, `logs/`) |
+| **Concurrency** | ✅ parallel `grok -p` runs don't deadlock on `~/.grok`'s lock files | ❔ untested |
+
+**What is NOT verified** — everything behind the auth wall:
+
+- the happy-path answer itself: Grok's `json` envelope (`text` / `sessionId`) and Kimi's stdout answer;
+- that `-r` / `-c` really restore context;
+- Grok's `streaming-json` event stream, which watch mode renders;
+- whether Grok's sandbox profiles behave as documented (and note: **auth is checked before `--sandbox`
+  and `-m` are validated**, so a bad value can't even be observed while logged out — which is why the
+  bridge validates both client-side).
+
+> [!NOTE]
+> **Deliberately scoped out for Kimi:** `agent_swarm` and watch support. Both would depend on Kimi's
+> `stream-json` envelope, and adding an unverified dependency on top of an unverified backend is how
+> you get two bugs that mask each other. Grok gets both, because its stream format is documented in
+> detail *and* its error events were observed live.
+
+### How to help
+
+If you have either subscription, please **[open a verification issue](https://github.com/SinanTufekci/agent-intern/issues/new?template=backend_verification.yml)**.
+The template is a checklist — tick only what you actually saw. The first box (*"a fresh ask returned a
+real answer"*) is worth more than all the others combined, and takes about a minute:
+
+```bash
+# 1. Does the setup look right? (spends no quota)
+#    -> call grok_status / kimi_status from Claude Code
+# 2. Does it answer?
+#    -> call grok_ask("say hi") / kimi_ask("say hi")
+# 3. If it fails, does the raw CLI fail the same way?
+grok -p "say hi" --output-format json
+kimi -p "say hi" --output-format text
+```
+
+That last command is the one I can't run from here, and it's what separates *"the bridge is wrong"*
+from *"the CLI changed"*. Partial reports are welcome; so is a plain "it didn't work, here's the error".
+
 ## How it works
 
-All four backends run **headless** and one-shot per call; the bridge's job is to get a clean answer
+All six backends run **headless** and one-shot per call; the bridge's job is to get a clean answer
 out of each and hand it to Claude Code as a plain string.
 
 ```mermaid
@@ -167,7 +247,7 @@ itself md5 of the workspace path).
 - **Cursor:** install `cursor-agent` (`curl https://cursor.com/install -fsSL | bash`) and run
   `cursor-agent login` once (or set a `CURSOR_API_KEY` env var).
 
-You don't need all four — the tools for a missing CLI simply report "not found" via their `*_status`
+You don't need all six — the tools for a missing CLI simply report "not found" via their `*_status`
 tool.
 
 ### Recommended — no clone, you control updates
@@ -235,17 +315,20 @@ Then point Claude Code at the absolute path to `server.py` under `mcpServers` in
 </td></tr>
 </table>
 
-Restart Claude Code. **Fifteen tools** appear, each prefixed `mcp__agent-intern__`:
+Restart Claude Code. **Twenty-one tools** appear, each prefixed `mcp__agent-intern__`:
 
 - **Antigravity (5):** `antigravity_ask`, `antigravity_continue`, `antigravity_image`,
   `antigravity_image_swarm`, `antigravity_status`
 - **Codex (3):** `codex_ask`, `codex_continue`, `codex_status`
 - **Copilot (3):** `copilot_ask`, `copilot_continue`, `copilot_status`
 - **Cursor (3):** `cursor_ask`, `cursor_continue`, `cursor_status`
-- **Shared (1):** `agent_swarm` — fans a list of tasks out across **all four** backends in one run
+- **Grok (3, experimental):** `grok_ask`, `grok_continue`, `grok_status`
+- **Kimi (3, experimental):** `kimi_ask`, `kimi_continue`, `kimi_status`
+- **Shared (1):** `agent_swarm` — fans a list of tasks out across **five** backends in one run
+  (everything but Kimi)
 
-The single-prompt tools — Antigravity, Codex, Copilot, **and** Cursor — take a **`watch=true`** flag
-for the live browser view ([Watch mode](#watch-mode)).
+The single-prompt tools — Antigravity, Codex, Copilot, Cursor, **and** Grok — take a **`watch=true`**
+flag for the live browser view ([Watch mode](#watch-mode)). Kimi has no watch mode yet.
 
 > [!NOTE]
 > **Your client learns how to use the bridge on its own.** The server ships MCP *instructions* — a
@@ -295,11 +378,27 @@ do the same.
 | `cursor_continue(prompt, workspace?, sandbox?="read-only", timeout_s?=180, watch?=false)` | Continue the Cursor chat **rooted at `workspace`** — resumes the exact chat id the bridge minted (`create-chat` + `--resume`), falling back to the newest on-disk chat for that cwd after a restart. `watch=true` opens the live view. |
 | `cursor_status()` | Setup diagnostics: **the bridge's own version + whether a newer release is available**, plus cursor version and login status (`cursor-agent status`). Spends no quota. |
 
+### 🧪 Grok Build *(experimental — [unverified](#experimental-backends))*
+
+| Tool | Purpose |
+|---|---|
+| `grok_ask(prompt, workspace?, sandbox?="read-only", model?, timeout_s?=180, watch?=false)` | Start a **new** Grok session. `sandbox` maps to grok's `--sandbox` profile plus a tool allowlist — a **real OS boundary on Linux/macOS only** (see [Grok bridge](#grok-bridge)); `model` selects the model (`-m`, validated against `grok models`). `watch=true` opens the live view, streaming grok's steps from its `--output-format streaming-json` event stream. |
+| `grok_continue(prompt, workspace?, sandbox?="read-only", timeout_s?=180, watch?=false)` | Continue the Grok session **rooted at `workspace`** — resumes the exact session id grok returned (`-r`), falling back to grok's own "most recent session for this cwd" (`-c`) after a restart. `sandbox` applies here too. `watch=true` opens the live view. |
+| `grok_status()` | Setup diagnostics: **the bridge's own version + whether a newer release is available**, plus grok version, auth state, and the model list — the last two both from `grok models`, which answers even while logged out. Spends no quota. |
+
+### 🌙 Kimi Code *(experimental — [unverified](#experimental-backends))*
+
+| Tool | Purpose |
+|---|---|
+| `kimi_ask(prompt, workspace?, model?, timeout_s?=180)` | Start a **new** Kimi session. **No `sandbox` argument** — Kimi print mode has no sandbox and auto-executes every tool. `model` is a lenient pass-through (`-m`, an alias from your `config.toml`); Kimi has no model list to validate against. No watch mode. |
+| `kimi_continue(prompt, workspace?, timeout_s?=180)` | Continue the Kimi session **rooted at `workspace`** (`-c`). Kimi scopes sessions per working directory, so there's no id to track — and no restart problem either. |
+| `kimi_status()` | Setup diagnostics: bridge version + update check, kimi version, whether a provider is configured (`kimi provider list` — the auth proxy), and the data dir. Spends no quota. |
+
 ### 🐝 Shared
 
 | Tool | Purpose |
 |---|---|
-| `agent_swarm(tasks, max_concurrency?=4, timeout_s?=180, watch?=false)` | Run **several tasks in parallel across all four backends** — each task names its `backend` (`antigravity`, `codex`, `copilot`, or `cursor`) plus a `prompt` (an optional `model` for any backend, and `sandbox` for Codex/Copilot/Cursor). Every answer comes back in one block; `watch=true` opens the live dashboard ([Swarm](#swarm)). |
+| `agent_swarm(tasks, max_concurrency?=4, timeout_s?=180, watch?=false)` | Run **several tasks in parallel across five backends** — each task names its `backend` (`antigravity`, `codex`, `copilot`, `cursor`, or `grok`) plus a `prompt` (an optional `model` for any backend, and `sandbox` for Codex/Copilot/Cursor/Grok). Every answer comes back in one block; `watch=true` opens the live dashboard ([Swarm](#swarm)). Kimi is not available here — see [Experimental backends](#experimental-backends). |
 
 `workspace` defaults to the MCP server's current working directory. Point it at a real project dir
 for context-aware answers — every backend gives the model access to files under that root (Codex,
@@ -326,7 +425,8 @@ fixed its stdout). Three things make Codex worth reaching for over Antigravity:
   interactive approval gate, so this flag **is** your safety boundary — opt into write access
   deliberately.
 - **Model selection works.** `model` maps to codex's `-m`. (agy's `--model` works in print mode too
-  as of 1.0.16; all four backends now expose the same `model` knob.)
+  as of 1.0.16; every backend now exposes the same `model` knob, except Kimi, which has no list to
+  validate against.)
 - **Stronger reasoning.** Codex is a coding agent, not an image model — there's no `codex_image`. Its
   strength is reasoning and real code/repo work; hand it the jobs that need a heavier model.
 
@@ -432,20 +532,111 @@ set `CURSOR_API_KEY` for headless use. Check with `cursor_status`. If `cursor-ag
 > unavailable), not an OS sandbox — safer than agy, weaker than Codex's `read-only`. Only use it with
 > **trusted prompts on trusted content**.
 
+<a id="grok-bridge"></a>
+
+## 🧪 Grok Build bridge — a real sandbox, on two of three platforms
+
+> [!WARNING]
+> **EXPERIMENTAL — never verified end-to-end.** Everything below the "Auth" line is confirmed against
+> a live grok 1.0.3; the answer path is not. See [Experimental backends](#experimental-backends), and
+> please [report what you find](https://github.com/SinanTufekci/agent-intern/issues/new?template=backend_verification.yml).
+
+xAI's [Grok Build](https://docs.x.ai/build/overview) (`grok`, installed with
+`curl -fsSL https://x.ai/cli/install.sh | bash`, or `irm https://x.ai/cli/install.ps1 | iex` on
+Windows) is stdout-native like Codex/Copilot/Cursor: `grok -p "<prompt>" --output-format json` runs a
+prompt non-interactively and writes a single JSON result object to stdout. What makes it interesting:
+
+- **It's open source.** [xai-org/grok-build](https://github.com/xai-org/grok-build) publishes the
+  actual CLI source, so this bridge's flag surface was read off the real clap definitions rather than
+  inferred from docs — then confirmed against `grok --help`. That's a much stronger footing than a
+  docs-derived bridge, and it caught a live discrepancy: xAI's own headless docs use `-m grok-build`
+  in their examples, but the real default on 1.0.3 is **`grok-4.5`**.
+- **The answer carries its own session id.** `--output-format json` returns
+  `{"text": …, "sessionId": …, "usage": …}`, so the bridge pins that id and resumes the exact session
+  with `-r <id>` — no id-minting dance like Cursor's, no rollout-scraping like Codex's. After a
+  restart it falls back to `-c`, grok's own "most recent session for this cwd", so continue survives
+  without ever reading grok's opaque SQLite session store.
+- **Free auth + model checks.** `grok models` answers *while logged out* (exit 0, printing
+  `You are not authenticated.` and the catalogue), so `grok_status` and model validation cost nothing
+  and need no login.
+
+**Sandbox is real — on Linux and macOS.** This is the only backend besides Codex with an OS-enforced
+boundary, but read the platform caveat:
+
+- **`read-only`** (default) — `--sandbox read-only` **plus** a `--tools` allowlist
+  (`read_file,list_dir,grep,glob,web_search,web_fetch`) **plus** `--no-subagents`.
+- **`workspace-write`** — `--sandbox workspace`: writes land in the workspace, `~/.grok`, and temp.
+- **`danger-full-access`** — `--sandbox off`. Avoid.
+
+> [!CAUTION]
+> **On Windows, grok's OS sandbox does not apply.** It's implemented with Landlock (Linux) and
+> Seatbelt (macOS); where it can't be applied, xAI's docs say grok "logs a warning and continues
+> **without enforcement**." That's why `read-only` here doesn't lean on the profile alone — the tool
+> allowlist is agent-enforced and holds on every platform. An **allowlist**, not a denylist, precisely
+> because it fails safe: a future grok that adds a new write tool can't silently slip through it.
+> Note that MCP meta-tools stay available under an allowlist, so a configured MCP server could still
+> write. For a hard boundary on every platform, use `codex_ask`.
+
+Every mode also passes `--always-approve`: grok's headless mode does **not** auto-approve on its own
+(unlike agy and Kimi), and there's no human to answer a prompt. Containment comes from the profile and
+the allowlist, not from the approval gate.
+
+**Auth.** `grok login` (browser OAuth), `grok login --device-code` (headless), or an `XAI_API_KEY` env
+var; credentials cache in `~/.grok/auth.json`. Needs a **SuperGrok or X Premium+** subscription. Check
+with `grok_status`. Set **`GROK_BIN`** to override the executable path — though the bridge already
+falls back to the installer's own `~/.grok/bin` when `grok` isn't on `PATH`, which matters because the
+installer appends to the user PATH and that never reaches an already-running server process.
+`GROK_HOME` relocates the whole data dir. The bridge disables grok's background auto-updater per call
+via `GROK_DISABLE_AUTOUPDATER=1` — a CLI that updates itself mid-session has broken this project
+before.
+
+<a id="kimi-bridge"></a>
+
+## 🌙 Kimi Code bridge — no sandbox, per-directory sessions
+
+> [!WARNING]
+> **EXPERIMENTAL — never verified end-to-end.** See [Experimental backends](#experimental-backends).
+
+Moonshot's [Kimi Code](https://github.com/MoonshotAI/kimi-code) (`kimi`, npm
+`@moonshot-ai/kimi-code`) runs the Kimi K2 family. `kimi -p "<prompt>" --output-format text` writes
+the clean final answer to stdout.
+
+- **Continue is per-directory.** Kimi scopes sessions to the working directory and exposes
+  `-c/--continue`, so the bridge just re-runs with `cwd=workspace` and `-c` — no id to capture, and
+  no restart problem. (`-S/--session <id>` exists but is deliberately unused: its on-disk format
+  couldn't be verified.)
+- **No model validation.** Kimi has no `models` command; aliases are user-defined in
+  `~/.kimi-code/config.toml` under `[models."<alias>"]`. `model` is a lenient pass-through, so a bad
+  alias surfaces as Kimi's own run-time error.
+- **`-p` refuses `--auto` and `--yolo`** (verified live on 0.29.1: *"Cannot combine --prompt with …"*)
+  because print mode is already self-approving — so the bridge passes neither.
+
+> [!CAUTION]
+> **Kimi has no sandbox and no `sandbox` argument.** Print mode auto-executes every tool call with no
+> approval gate — the same posture as agy's print mode. No flag makes it safe. Only use it with
+> **trusted prompts on trusted content**.
+
+**Auth.** `kimi login` (device-code OAuth) or an API key in `~/.kimi-code/config.toml` (it does *not*
+read a bare env var). Check with `kimi_status`, which reads `kimi provider list` as the auth proxy.
+Set **`KIMI_BIN`** to override the executable path; `KIMI_CODE_HOME` relocates the data dir.
+
+**No swarm or watch support**, deliberately — both would depend on Kimi's `stream-json` envelope,
+which no one has confirmed. They'll follow a successful verification report.
+
 <a id="watch-mode"></a>
 
 ## 👁️ Watch mode — Agent Intern (experimental)
 
 Pass **`watch=true`** to **any single-prompt tool** — `antigravity_ask`, `antigravity_continue`,
 `antigravity_image`, `codex_ask`, `codex_continue`, `copilot_ask`, `copilot_continue`, `cursor_ask`,
-or `cursor_continue` — to **watch
+`cursor_continue`, `grok_ask`, or `grok_continue` — to **watch
 the agent work live in a little chat-style browser window** called **Agent Intern**. The agent
 still runs headless; alongside it the bridge serves a tiny page on `127.0.0.1` and opens it in a
 small, chromeless app window that renders the exchange as a **conversation**: your prompt shows as a
 chat bubble, the agent's live steps stream in a collapsible "thinking" trace — its planner narration
 (▸), the **real commands** it runs (`$`), and completions (✓), read live (from agy's
 `--output-format stream-json` on 1.1.8+ — its transcript on older agy — or codex's / copilot's JSON
-event stream, or cursor's `--output-format stream-json`) — and the final
+event stream, or cursor's / grok's streaming-json) — and the final
 answer arrives as a Markdown card (and, for
 `antigravity_image` with `watch=true`, the generated image shown inline). A **`*_continue`** run
 opens with the **prior turns of the conversation shown as history**, so it reads as one ongoing
@@ -527,6 +718,8 @@ agent_swarm(tasks=[
    "sandbox": "read-only", "workspace": "./repo"},
   {"backend": "cursor", "prompt": "Draft a docstring for src/utils.py.",
    "model": "auto", "workspace": "./repo"},
+  {"backend": "grok", "prompt": "List the public exports of src/index.ts.",
+   "sandbox": "read-only", "model": "grok-4.5", "workspace": "./repo"},
 ])
 ```
 
@@ -549,7 +742,7 @@ so file access is unchanged. Measured ~**2.8× speedup at 3 agy workers** (the A
 backend does not serialize per-account); higher `max_concurrency` trades
 quota/rate-limit pressure for wall-clock.
 
-- **Per-task fields** — `backend` (`antigravity`/`codex`/`copilot`/`cursor`) and `prompt`
+- **Per-task fields** — `backend` (`antigravity`/`codex`/`copilot`/`cursor`/`grok`) and `prompt`
   are required; `workspace` defaults to the server cwd; `sandbox` and `model` apply
   to **Codex, Copilot, and Cursor** (ignored for Antigravity). Swarm workers are
   **one-shot** — there is no `*_continue` for a swarm worker's session.
@@ -577,8 +770,9 @@ quota/rate-limit pressure for wall-clock.
 
 ## ⚠️ Security
 
-All four backends run the model as an **autonomous agent**. The difference is whether you get a real
-boundary: Codex enforces one, Copilot and Cursor offer best-effort ones, Antigravity offers none.
+All six backends run the model as an **autonomous agent**. The difference is whether you get a real
+boundary: Codex enforces one everywhere and Grok on Linux/macOS only; Copilot and Cursor offer
+best-effort ones; Antigravity and Kimi offer none.
 
 ### Antigravity — no usable boundary
 
@@ -654,14 +848,43 @@ maps to cursor's mode/force flags — an **agent-enforced**, not OS-level, bound
 
 For a **hard** read-only boundary, prefer `codex_ask`.
 
+### Grok — real, but only on Linux and macOS
+
+`grok -p` runs headless with `--always-approve` (its headless mode does not auto-approve on its own,
+and nothing is there to answer a prompt). Its `sandbox` maps to grok's OS profile **plus** a tool
+allowlist:
+
+- **`read-only`** (default) — `--sandbox read-only` + `--tools read_file,list_dir,grep,glob,web_search,web_fetch`
+  + `--no-subagents`.
+- **`workspace-write`** — `--sandbox workspace`: writes confined to the workspace, `~/.grok`, temp.
+- **`danger-full-access`** — `--sandbox off`. Avoid.
+
+The profile is enforced by **Landlock (Linux ≥ 5.13)** and **Seatbelt (macOS)**. On **Windows there is
+no mechanism**, and per xAI's docs grok "logs a warning and continues without enforcement" — so on
+Windows the only thing standing between `read-only` and your disk is the agent-enforced tool
+allowlist. Treat Windows `read-only` as best-effort (Copilot/Cursor tier), not as a jail. The bridge
+uses an allowlist rather than a denylist so that a future grok with a new write tool fails safe; note
+that MCP meta-tools remain available under an allowlist regardless.
+
+⚠️ This backend is [unverified](#experimental-backends) — including these sandbox claims, which could
+not be exercised, because grok checks **auth before it validates `--sandbox`**.
+
+### Kimi — no boundary at all
+
+`kimi -p` has **no sandbox and no `sandbox` argument**. Print mode auto-executes every tool call with
+no approval gate — the same posture as Antigravity, and verified live on 0.29.1 in the sense that `-p`
+*rejects* `--auto`/`--yolo` precisely because it is already self-approving. No flag makes it safe.
+Assume every `kimi_ask` runs arbitrary code with your privileges.
+
 ### What that means for you
 
-- The `workspace` argument is only a *starting context*, **not a security boundary** — Antigravity
-  can and does act outside it; Codex is bounded by its enforced `sandbox`; Copilot by its best-effort
-  tool/path permissions; Cursor by its agent-enforced mode/force.
-- An Antigravity call effectively runs **arbitrary code with your user privileges**. A Copilot or
-  Cursor call does too outside its best-effort denials; a Codex call does unless you keep it at
-  `read-only`.
+- The `workspace` argument is only a *starting context*, **not a security boundary** — Antigravity and
+  Kimi can and do act outside it; Codex is bounded by its enforced `sandbox`; Grok by its OS profile
+  on Linux/macOS and by a tool allowlist elsewhere; Copilot by its best-effort tool/path permissions;
+  Cursor by its agent-enforced mode/force.
+- An Antigravity or Kimi call effectively runs **arbitrary code with your user privileges**. A Copilot
+  or Cursor call does too outside its best-effort denials; a Grok call does on Windows outside its
+  allowlist; a Codex call does unless you keep it at `read-only`.
 - Only invoke these with **trusted prompts on trusted content**. Untrusted input here is the classic
   prompt-injection *lethal trifecta*: private-data access + code execution + network egress.
 - For real isolation, run the **whole bridge inside a container or VM**.
@@ -682,15 +905,15 @@ staying within them.
 </details>
 
 <details>
-<summary><b>Do I need all four CLIs?</b></summary>
+<summary><b>Do I need all six CLIs?</b></summary>
 
 No. Each backend is independent — install only the CLI(s) you want. The tools for a missing backend
 report "not found" via their `*_status` tool (`antigravity_status` / `codex_status` /
-`copilot_status` / `cursor_status`) and never crash the server.
+`copilot_status` / `cursor_status` / `grok_status` / `kimi_status`) and never crash the server.
 </details>
 
 <details>
-<summary><b>When should I use Antigravity vs Codex vs Copilot vs Cursor?</b></summary>
+<summary><b>When should I use Antigravity vs Codex vs Copilot vs Cursor vs Grok vs Kimi?</b></summary>
 
 Use **Antigravity** for fast, cheap tool-calling, quick answers, and **image generation** (it's the
 only backend with an image model) — and it now lets you **pick the model** too (agy's `--model`). Use
@@ -699,8 +922,15 @@ only backend with an image model) — and it now lets you **pick the model** too
 second coding opinion alongside Codex — noting its sandbox is **best-effort**, not enforced. Use
 **Cursor** for agentic coding on a Cursor plan, or when you want the **widest model menu** —
 GPT, Claude, Grok, and Composer, all via `model` — noting its sandbox is **agent-enforced**, like
-Copilot's. All four let you choose a `model`; in a swarm you can mix all four. See
-[The four backends at a glance](#the-four-backends-at-a-glance).
+Copilot's.
+
+**Grok** and **Kimi** are [experimental and unverified](#experimental-backends) — reach for them to
+help verify them, or if they're the subscription you actually have. Grok is the more capable of the
+two here: real OS sandbox (Linux/macOS), watch mode, and swarm support. Kimi has no sandbox and no
+swarm/watch yet.
+
+All of them let you choose a `model` (except Kimi, which can't validate one); in a swarm
+you can mix five of the six. See [The backends at a glance](#the-backends-at-a-glance).
 </details>
 
 <details>
@@ -793,6 +1023,18 @@ running **serialized** in your real HOME — correct, but without the speedup. W
 
 ## Status & caveats
 
+- 🧪 **Grok Build and Kimi Code ship UNVERIFIED — help wanted.** Two new backends, neither ever
+  exercised against an authenticated account, because I have neither subscription. This is a
+  deliberate trade: shipping them unverified is the only way anyone *can* verify them, and the parts
+  that historically rot — flag surfaces, model ids, error shapes — are pinned down live against
+  grok 1.0.3 and kimi 0.29.1. Grok's are unusually solid, since its CLI is
+  [open source](https://github.com/xai-org/grok-build): every argv the bridge builds was read off the
+  real clap definitions and confirmed to parse. What's unproven is everything behind each CLI's auth
+  wall — the answer itself, resume, and Grok's streaming events. That verification gap already caught
+  one live docs error (xAI documents `grok-build` as the model; the real default is `grok-4.5`), which
+  is a fair warning about what else the docs may be wrong about. **If you have either subscription,
+  [one issue from the verification template](https://github.com/SinanTufekci/agent-intern/issues/new?template=backend_verification.yml)
+  closes this gap.** [Full detail →](#experimental-backends)
 - 🐛 **`agent_swarm` antigravity workers died with "authentication timed out" on macOS — fixed**
   ([#2](https://github.com/SinanTufekci/agent-intern/issues/2)). Each swarm worker gets an isolated
   `HOME` so agy's per-process state can't collide. The module shipped asserting that auth survives
@@ -879,7 +1121,7 @@ running **serialized** in your real HOME — correct, but without the speedup. W
   bridge spawned them with bare `text=True`, which decodes using the **locale** codepage
   (`locale.getpreferredencoding()` — cp1254 on a Turkish Windows, cp1252 elsewhere). Any non-ASCII
   answer came back corrupted: `dosyası` arrived as `dosyasÄ±`, exactly
-  `'dosyası'.encode('utf-8').decode('cp1254')`. All four bridges plus the swarm workers now decode
+  `'dosyası'.encode('utf-8').decode('cp1254')`. Every bridge plus the swarm workers now decode
   UTF-8 explicitly with `errors="replace"`, the pattern `cursor_bridge.py` already used. A
   regression test asserts no subprocess call reintroduces bare `text=True`. ASCII-only answers were
   never affected, which is why this survived so long.
@@ -1024,6 +1266,8 @@ running **serialized** in your real HOME — correct, but without the speedup. W
 - **For the Codex tools:** [`codex`](https://developers.openai.com/codex/) on `PATH` and logged in (`codex login`) — verified on **codex-cli 0.144.1**
 - **For the Copilot tools:** [`copilot`](https://docs.github.com/en/copilot/how-tos/copilot-cli) on `PATH` and logged in (`copilot` → `/login`, or a `COPILOT_GITHUB_TOKEN`/`GH_TOKEN` env) — verified on **copilot 1.0.69**
 - **For the Cursor tools:** [`cursor-agent`](https://cursor.com/cli) on `PATH` and logged in (`cursor-agent login`, or a `CURSOR_API_KEY` env) — verified on **cursor-agent 2026.07.23**
+- **For the Grok tools (experimental):** [`grok`](https://docs.x.ai/build/overview) on `PATH` and logged in (`grok login`, or an `XAI_API_KEY` env) plus a SuperGrok / X Premium+ subscription — flag surface verified on **grok 1.0.3**, [answer path unverified](#experimental-backends)
+- **For the Kimi tools (experimental):** [`kimi`](https://github.com/MoonshotAI/kimi-code) on `PATH` and logged in (`kimi login`, or an API key in `~/.kimi-code/config.toml`) — flag surface verified on **kimi 0.29.1**, [answer path unverified](#experimental-backends)
 
 Each backend is independent — install only the CLI(s) you plan to use; the other tools simply report "not found" via their `*_status` tool.
 
@@ -1035,11 +1279,14 @@ Each backend is independent — install only the CLI(s) you plan to use; the oth
 > **`COPILOT_BIN`** if `copilot` isn't (the winget install lands under
 > `%LOCALAPPDATA%\Microsoft\WinGet\Packages\GitHub.Copilot_*\copilot.exe`). Finally, set
 > **`CURSOR_BIN`** if `cursor-agent` isn't reliably on `PATH` (the installer drops a `cursor-agent.CMD`
-> shim a bare name can't launch on Windows).
+> shim a bare name can't launch on Windows). **`GROK_BIN`** and **`KIMI_BIN`** do the same for the two
+> experimental backends — though the Grok bridge already falls back to the installer's own
+> `~/.grok/bin` on a `PATH` miss, which matters because that installer appends to the user PATH and
+> the change never reaches an already-running server.
 
 The bridge uses only cross-platform Python (`Path.home()`, `subprocess`) and reads paths under
-`~/.gemini/antigravity-cli/`, `~/.codex/`, `~/.copilot/`, and `~/.cursor/`, which the CLIs write the
-same way on every OS. **Developed and verified on Windows; macOS and Linux should work unmodified
+`~/.gemini/antigravity-cli/`, `~/.codex/`, `~/.copilot/`, `~/.cursor/`, `~/.grok/`, and
+`~/.kimi-code/`, which the CLIs write the same way on every OS. **Developed and verified on Windows; macOS and Linux should work unmodified
 provided the CLIs run there.** If you test it on those platforms, please open an issue / PR to confirm.
 
 ## 🌐 Community & Acknowledgments

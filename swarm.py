@@ -856,16 +856,22 @@ _BACKEND_ALIASES = {
     "github": "copilot",
     "gh": "copilot",
     "cursor": "cursor",
+    "grok": "grok",
+    "grok-build": "grok",
+    "xai": "grok",
 }
+
+# Backends the swarm can dispatch to, in the order the error message lists them.
+_BACKEND_NAMES = ("antigravity", "codex", "copilot", "cursor", "grok")
 
 
 def _normalize_tasks(tasks) -> list[dict]:
     """Validate + canonicalize agent_swarm tasks into a uniform list.
 
     Each task is {backend, prompt, workspace?, sandbox?, model?}. backend accepts a
-    few aliases; `sandbox` applies to Codex and Copilot (agy has no sandbox), while
-    `model` applies to ALL three (agy's --model works in print mode as of 1.0.16).
-    Raises ValueError naming the offending index on bad input.
+    few aliases; `sandbox` applies to Codex, Copilot, Cursor and Grok (agy has no
+    sandbox), while `model` applies to every backend (agy's --model works in print
+    mode as of 1.0.16). Raises ValueError naming the offending index on bad input.
     """
     if not isinstance(tasks, list):
         raise ValueError("tasks must be a list of {backend, prompt, ...} objects")
@@ -875,9 +881,9 @@ def _normalize_tasks(tasks) -> list[dict]:
             raise ValueError(f"task {i}: must be an object, got {type(t).__name__}")
         backend = _BACKEND_ALIASES.get(str(t.get("backend", "")).strip().lower())
         if backend is None:
+            allowed = ", ".join(repr(b) for b in _BACKEND_NAMES)
             raise ValueError(
-                f"task {i}: backend must be 'antigravity', 'codex', 'copilot', or "
-                f"'cursor' (got {t.get('backend')!r})"
+                f"task {i}: backend must be one of {allowed} (got {t.get('backend')!r})"
             )
         prompt = t.get("prompt")
         if not prompt or not str(prompt).strip():
@@ -904,6 +910,12 @@ def _normalize_tasks(tasks) -> list[dict]:
             sandbox = t.get("sandbox") or cursor_bridge.DEFAULT_SANDBOX
             cursor_bridge.validate_sandbox(sandbox)  # fail fast on a bad policy
             model = cursor_bridge.validate_model(t.get("model") or None)  # fail fast on a typo
+        elif backend == "grok":
+            import grok_bridge
+
+            sandbox = t.get("sandbox") or grok_bridge.DEFAULT_SANDBOX
+            grok_bridge.validate_sandbox(sandbox)  # fail fast on a bad policy
+            model = grok_bridge.validate_model(t.get("model") or None)  # fail fast on a typo
         else:  # antigravity: no sandbox, but --model works in print mode (agy 1.0.16)
             import server
 
@@ -1124,6 +1136,78 @@ def _run_cursor_worker_watched(index, prompt, workspace, sandbox, model, timeout
         )
 
 
+def _run_grok_worker(index, prompt, workspace, sandbox, model, timeout_s) -> WorkerResult:
+    # NOTE: no HOME/GROK_HOME isolation here, unlike the agy workers. Grok mints a
+    # fresh session per headless run, so parallel runs don't collide (verified:
+    # concurrent `grok -p` calls don't deadlock on ~/.grok's lock files) — and
+    # isolating GROK_HOME would HIDE the user's auth.json, since grok caches
+    # credentials inside that same dir. That's issue #2's failure mode, on every
+    # platform rather than just macOS.
+    import grok_bridge
+
+    start = time.time()
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        ans = grok_bridge.run_grok(prompt, workspace, sandbox, model, False, timeout_s, pin=False)
+        return WorkerResult(
+            index,
+            True,
+            answer=ans,
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            backend="grok",
+        )
+    except Exception as e:  # noqa: BLE001 — error isolation: one worker must not sink the swarm
+        return WorkerResult(
+            index,
+            False,
+            error=str(e),
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            backend="grok",
+        )
+
+
+def _run_grok_worker_watched(index, prompt, workspace, sandbox, model, timeout_s) -> WorkerResult:
+    import grok_bridge
+    import server
+    import swarm_watch
+
+    start = time.time()
+    swarm_watch.worker_update(index, status="working", started=start)
+
+    def on_event(ev: dict) -> None:
+        lines = server._grok_event_to_watch_lines(ev)
+        if lines:
+            t = round(time.time() - start, 1)
+            swarm_watch.worker_append(index, [{"kind": k, "text": x, "t": t} for k, x in lines])
+
+    try:
+        os.makedirs(workspace, exist_ok=True)
+        ans = grok_bridge.run_grok_streaming(
+            prompt, workspace, sandbox, model, False, timeout_s, on_event, pin=False
+        )
+        swarm_watch.worker_finish(index, "done", ans, time.time() - start)
+        return WorkerResult(
+            index,
+            True,
+            answer=ans,
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            backend="grok",
+        )
+    except Exception as e:  # noqa: BLE001
+        swarm_watch.worker_finish(index, "error", str(e), time.time() - start)
+        return WorkerResult(
+            index,
+            False,
+            error=str(e),
+            elapsed=round(time.time() - start, 1),
+            workspace=workspace,
+            backend="grok",
+        )
+
+
 def swarm_agents(
     tasks,
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
@@ -1158,6 +1242,9 @@ def swarm_agents(
             return fn(i, t["prompt"], t["workspace"], t["sandbox"], t["model"], timeout_s)
         if t["backend"] == "cursor":
             fn = _run_cursor_worker_watched if watch else _run_cursor_worker
+            return fn(i, t["prompt"], t["workspace"], t["sandbox"], t["model"], timeout_s)
+        if t["backend"] == "grok":
+            fn = _run_grok_worker_watched if watch else _run_grok_worker
             return fn(i, t["prompt"], t["workspace"], t["sandbox"], t["model"], timeout_s)
         fn = _run_text_worker_watched if watch else _run_text_worker
         return fn(i, t["prompt"], t["workspace"], t["model"], timeout_s)
