@@ -4,7 +4,7 @@
 
 <img src="assets/bridge-animation.svg" width="100%" alt="Claude Code bridging Google Antigravity, OpenAI Codex, GitHub Copilot, and Cursor" />
 
-**Drive six external coding CLIs — Google's [Antigravity](https://antigravity.google/) (Gemini 3.6 Flash), [OpenAI Codex](https://developers.openai.com/codex/), the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli), [Cursor](https://cursor.com/cli), and the two experimental newcomers [Grok Build](https://docs.x.ai/build/overview) and [Kimi Code](https://github.com/MoonshotAI/kimi-code) — as sub-agents inside [Claude Code](https://claude.com/claude-code). Text answers, image generation, real repo work, and parallel swarms, on quota you already pay for.**
+**Drive six external coding CLIs — Google's [Antigravity](https://antigravity.google/) (Gemini 3.7 Flash), [OpenAI Codex](https://developers.openai.com/codex/), the [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli), [Cursor](https://cursor.com/cli), and the two experimental newcomers [Grok Build](https://docs.x.ai/build/overview) and [Kimi Code](https://github.com/MoonshotAI/kimi-code) — as sub-agents inside [Claude Code](https://claude.com/claude-code). Text answers, image generation, real repo work, and parallel swarms, on quota you already pay for.**
 
 [![CI](https://github.com/SinanTufekci/agent-intern/actions/workflows/ci.yml/badge.svg)](https://github.com/SinanTufekci/agent-intern/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/agent-intern?logo=pypi&logoColor=white&color=2ea44f)](https://pypi.org/project/agent-intern/)
@@ -13,7 +13,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![MCP server](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io/)
 [![Glama](https://glama.ai/mcp/servers/SinanTufekci/agent-intern/badges/score.svg)](https://glama.ai/mcp/servers/SinanTufekci/agent-intern)
-[![agy 1.1.10 verified](https://img.shields.io/badge/agy-1.1.10%20verified-2ea44f)](https://antigravity.google/)
+[![agy 1.1.20 verified](https://img.shields.io/badge/agy-1.1.20%20verified-2ea44f)](https://antigravity.google/)
 [![codex 0.144.1 verified](https://img.shields.io/badge/codex--cli-0.144.1%20verified-2ea44f)](https://developers.openai.com/codex/)
 [![copilot 1.0.69 verified](https://img.shields.io/badge/copilot--cli-1.0.69%20verified-2ea44f)](https://docs.github.com/en/copilot/how-tos/copilot-cli)
 [![cursor 2026.07.23 verified](https://img.shields.io/badge/cursor--agent-2026.07.23%20verified-2ea44f)](https://cursor.com/cli)
@@ -32,7 +32,7 @@ Claude Code as clean MCP tools so you can delegate work to a different model fam
 leaving your terminal, and on the subscriptions you already have. Each backend is independent: install
 one, or all six.
 
-- **🛰️ Antigravity (`agy`, Gemini 3.6 Flash High).** Fast, cheap tool-calling — and the **only**
+- **🛰️ Antigravity (`agy`, Gemini 3.7 Flash High).** Fast, cheap tool-calling — and the **only**
   backend with an image model. Its headless print mode (`agy -p`) historically had a **stdout bug**:
   it wrote the answer to the *controlling terminal* instead of its stdout, so anything capturing
   stdout got nothing (and, under a TUI, agy's text leaked into the host's prompt). **agy 1.0.15 fixed
@@ -108,10 +108,10 @@ The four verified backends first; the [two experimental ones](#experimental-back
 
 | | 🛰️ **Antigravity** (`agy`) | 🤖 **Codex** (`codex exec`) | 🐙 **Copilot** (`copilot -p`) | ✳️ **Cursor** (`cursor-agent -p`) |
 |---|---|---|---|---|
-| **Model** | Selectable via `model` (agy's `--model`); Gemini 3.6 Flash (High) default (see [Model & auth](#model--auth)) | Selectable via `model` (codex's `-m`) | Selectable via `model` (`--model`) | Selectable via `model` (`--model`), validated against `cursor-agent models` |
+| **Model** | Selectable via `model` (agy's `--model`); Gemini 3.7 Flash (High) default (see [Model & auth](#model--auth)) | Selectable via `model` (codex's `-m`) | Selectable via `model` (`--model`) | Selectable via `model` (`--model`), validated against `cursor-agent models` |
 | **Best at** | Fast, cheap tool-calling; quick answers | Heavier reasoning; real code/repo work | Agentic coding; real code/repo work | Agentic coding; wide model menu (GPT/Claude/Grok/Composer) |
 | **Image generation** | ✅ `antigravity_image` (+ `antigravity_image_swarm`) | ❌ no image model | ❌ no image model | ❌ no image model |
-| **Sandbox** | ❌ no real boundary (`--sandbox` blocks only shell) | ✅ real, enforced: `read-only` / `workspace-write` / `danger-full-access` | ⚠️ best-effort: tool/path permissions (`read-only` denies write/shell) — **not** an OS sandbox | ⚠️ agent-enforced: mode/force (`read-only` = `--mode ask`, write/shell tools unavailable) — **not** an OS sandbox |
+| **Sandbox** | ❌ no real boundary (`--sandbox` blocks only shell); ⚠️ opt-in `plan=True` blocks writes/shell, agent-enforced | ✅ real, enforced: `read-only` / `workspace-write` / `danger-full-access` | ⚠️ best-effort: tool/path permissions (`read-only` denies write/shell) — **not** an OS sandbox | ⚠️ agent-enforced: mode/force (`read-only` = `--mode ask`, write/shell tools unavailable) — **not** an OS sandbox |
 | **How the answer is read** | `--output-format json` on agy 1.1.8+ (`stream-json` when watching); else stdout, else scraped from `transcript.jsonl` | Written to a file via `-o/--output-last-message` | stdout (`-s` silent mode) | stdout (`--output-format text`) |
 | **Continue mechanism** | Pins the workspace's conversation id (`--conversation`) | Resumes the session id (`codex exec resume <id>`) | Resumes a self-set session UUID (`--session-id`) | Mints a chat id (`create-chat`) and resumes it (`--resume <id>`) |
 | **Auth** | OS credential store (AI Pro session) | `codex login` (ChatGPT account or API key) | OS credential store (`copilot login`) or a GitHub token env | `cursor-agent login` (OS credential store) or `CURSOR_API_KEY` |
@@ -348,8 +348,8 @@ do the same.
 
 | Tool | Purpose |
 |---|---|
-| `antigravity_ask(prompt, workspace?, model?, timeout_s?=180, watch?=false)` | Start a **new** Antigravity conversation. `model` selects the model (agy's `--model`, e.g. `"claude-sonnet-4-6"`); validated against `agy models`, defaults to your `settings.json` model. `watch=true` opens the live browser view ([Watch mode](#watch-mode)). |
-| `antigravity_continue(prompt, workspace?, model?, timeout_s?=180, watch?=false)` | Continue the conversation **rooted at `workspace`** (pinned by id). agy's model is per-invocation, so `model` can differ from the original ask. `watch=true` opens the live view. |
+| `antigravity_ask(prompt, workspace?, model?, timeout_s?=180, watch?=false, plan?=false, schema?)` | Start a **new** Antigravity conversation. `model` selects the model (agy's `--model`, e.g. `"claude-sonnet-4-6"`); validated against `agy models`, defaults to your `settings.json` model. `watch=true` opens the live browser view ([Watch mode](#watch-mode)). `plan=true` runs agy in **plan mode** — it reads and writes a plan, but does not edit files or run commands ([Security](#security); agy 1.1.12+). `schema` (a JSON Schema) returns the **validated object** as JSON text instead of prose — read the caveat in [Status & caveats](#status--caveats) before using it for a judgment (agy 1.1.8+). |
+| `antigravity_continue(prompt, workspace?, model?, timeout_s?=180, watch?=false, plan?=false, schema?)` | Continue the conversation **rooted at `workspace`** (pinned by id). agy's model is per-invocation, so `model` can differ from the original ask — and so are `plan` and `schema`, so a follow-up can be restricted, or shaped, even if the original ask was not. `watch=true` opens the live view. |
 | `antigravity_image(prompt, output_path?, workspace?, timeout_s?=240, watch?=false)` | Generate an image; saves the file (extension corrected to the real bytes) and returns its path + format/size. `watch=true` streams progress and **shows the image** inline. |
 | `antigravity_image_swarm(prompts, output_paths?, workspaces?, max_concurrency?=4, timeout_s?=240, watch?=false)` | Generate **several images in parallel** (one worker per prompt). |
 | `antigravity_status()` | Setup diagnostics: **the bridge's own version + whether a newer release is available**, **remaining AI Pro quota per model family** (agy 1.1.11+), plus agy version/compat, state dirs, and newest-transcript readability. Spends no quota. |
@@ -398,11 +398,20 @@ do the same.
 
 | Tool | Purpose |
 |---|---|
-| `agent_swarm(tasks, max_concurrency?=4, timeout_s?=180, watch?=false)` | Run **several tasks in parallel across five backends** — each task names its `backend` (`antigravity`, `codex`, `copilot`, `cursor`, or `grok`) plus a `prompt` (an optional `model` for any backend, and `sandbox` for Codex/Copilot/Cursor/Grok). Every answer comes back in one block; `watch=true` opens the live dashboard ([Swarm](#swarm)). Kimi is not available here — see [Experimental backends](#experimental-backends). |
+| `agent_swarm(tasks, max_concurrency?=4, timeout_s?=180, watch?=false)` | Run **several tasks in parallel across five backends** — each task names its `backend` (`antigravity`, `codex`, `copilot`, `cursor`, or `grok`) plus a `prompt` (an optional `model` and `sandbox` for any backend — on Antigravity `sandbox: "read-only"` means **plan mode**). Every answer comes back in one block; `watch=true` opens the live dashboard ([Swarm](#swarm)). Kimi is not available here — see [Experimental backends](#experimental-backends). |
 
 `workspace` defaults to the MCP server's current working directory. Point it at a real project dir
 for context-aware answers — every backend gives the model access to files under that root (Codex,
 Copilot, and Cursor honoring their `sandbox`).
+
+**`sandbox` now applies to Antigravity too.** It used to be silently ignored there, so an agy task
+written as `{"backend": "agy", "sandbox": "read-only"}` ran completely unrestricted while reading as
+though it were fenced. `"read-only"` maps to agy's plan mode, `"danger-full-access"` says plainly
+that the worker is unrestricted, and `"workspace-write"` is **refused** — agy has no write scoping to
+offer, and accepting it would promise a fence that doesn't exist. **Omitting `sandbox` leaves an
+Antigravity worker unrestricted**, unlike every other backend, whose default is `read-only`: that
+long-standing default is left alone so existing file-writing swarms keep working, so fence agy
+explicitly when you want it fenced.
 
 `antigravity_image` forces agy to save to an explicit absolute path — without one, agy
 falls back to its own scratch dir (`~/.gemini/antigravity-cli/scratch/`). It then
@@ -763,7 +772,7 @@ quota/rate-limit pressure for wall-clock.
 
 | | 🛰️ **Antigravity** | 🤖 **Codex** | 🐙 **Copilot** | ✳️ **Cursor** |
 |---|---|---|---|---|
-| **Model** | **Selectable** via the `model` argument (agy's `--model`, e.g. `"gemini-3.1-pro-high"`, `"claude-sonnet-4-6"`); omit to use the `"model"` field in agy's `settings.json` (**`gemini-3.6-flash-high`** by default as of 1.1.6). **agy 1.1.5 replaced the old human labels with these slugs** — the old `"Gemini 3.1 Pro (High)"` form no longer works. Switching model in `-p` used to hang (through ~1.0.14) but is **fixed as of 1.0.16**. An unknown model was silently ignored through 1.1.1 and hard-fails in `-p` as of **1.1.2**; either way the bridge validates it against `agy models` and rejects a typo up front. Flash High is speed-optimized for cheap tool-calling; pick a bigger model for heavier work. | **Selectable** via the `model` argument (codex's `-m`). codex does not hang on a switch, so model choice is a first-class knob. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.3-codex`, `claude-sonnet-4.6`, `auto`); omit for your account default. An unavailable model errors immediately. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.2`, `claude-4-sonnet-thinking`, `auto`, or parameterized ids like `claude-opus-4-8[context=1m]`); a wide GPT/Claude/Grok/Composer menu, validated against `cursor-agent models` (a typo is rejected up front). Omit for your Cursor account default. |
+| **Model** | **Selectable** via the `model` argument (agy's `--model`, e.g. `"gemini-3.1-pro-high"`, `"claude-sonnet-4-6"`); omit to use the `"model"` field in agy's `settings.json` (**`gemini-3.7-flash-high`** by default as of ~1.1.16). **agy 1.1.5 replaced the old human labels with these slugs** — the old `"Gemini 3.1 Pro (High)"` form no longer works. Switching model in `-p` used to hang (through ~1.0.14) but is **fixed as of 1.0.16**. An unknown model was silently ignored through 1.1.1 and hard-fails in `-p` as of **1.1.2**; either way the bridge validates it against `agy models` and rejects a typo up front. Flash High is speed-optimized for cheap tool-calling; pick a bigger model for heavier work. | **Selectable** via the `model` argument (codex's `-m`). codex does not hang on a switch, so model choice is a first-class knob. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.3-codex`, `claude-sonnet-4.6`, `auto`); omit for your account default. An unavailable model errors immediately. | **Selectable** via the `model` argument (`--model`, e.g. `gpt-5.2`, `claude-4-sonnet-thinking`, `auto`, or parameterized ids like `claude-opus-4-8[context=1m]`); a wide GPT/Claude/Grok/Composer menu, validated against `cursor-agent models` (a typo is rejected up front). Omit for your Cursor account default. |
 | **Auth** | Piggybacks whatever credential store `agy` uses on your OS (Windows Credential Manager, macOS Keychain, libsecret on Linux — the bridge never touches it directly). Log in once; every call silent-auths on the **same AI Pro quota** you already pay for. | Uses your existing **Codex login** — ChatGPT account or API key. Run `codex login` once; verify with `codex_status`. | Uses your existing **Copilot login** — run `copilot` then `/login` once (OS credential store), or set `COPILOT_GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_TOKEN`. Verify with `copilot_status`. | Uses your existing **Cursor login** — run `cursor-agent login` once (OS credential store), or set `CURSOR_API_KEY`. Verify with `cursor_status`. |
 
 <a id="security"></a>
@@ -782,7 +791,8 @@ with no opt-out at all. As of **1.1.3** it is a choice the bridge makes: agy fin
 tool calls, and the bridge deliberately opts out with `--dangerously-skip-permissions`, because a
 gated `-p` can do no useful work (it soft-denies even a plain file read, and print mode has no way
 to prompt). The posture below is therefore unchanged — assume every call runs arbitrary code with
-your privileges. Re-verified empirically on **agy 1.0.9 / Windows**, with the 1.1.3 amendment noted:
+your privileges. The **one** exception is the opt-in `plan=True` described in the last bullet; it is
+a real restriction, but an agent-enforced one, so it does not change the default posture. Re-verified empirically on **agy 1.0.9 / Windows**, with the 1.1.3 amendment noted:
 
 - Print mode runs out-of-workspace file writes and live network fetches **even without**
   `--dangerously-skip-permissions` — that flag was a **no-op** for `-p` through 1.1.2. As of 1.1.3
@@ -806,6 +816,21 @@ your privileges. Re-verified empirically on **agy 1.0.9 / Windows**, with the 1.
   top of that, a `--sandbox` run whose blocked terminal command halts it writes **no JSONL
   transcript** (only the SQLite `.db`, re-confirmed on 1.0.9). The bridge can now read that `.db`,
   but still never passes `--sandbox` — it's no boundary, with file writes and network left open.
+- ✅ **`plan=True` is the first Antigravity restriction that actually holds** — opt-in, per call, on
+  `antigravity_ask` / `antigravity_continue`, and gated at agy **1.1.12** (older agy parses `--mode`
+  and ignores it in print mode, so the bridge **refuses** rather than handing back an unrestricted
+  run that reports success). It maps to agy's `--mode plan`: agy investigates and writes an
+  implementation plan into its own directory instead of touching yours. Verified on 1.1.20 through
+  the bridge's own code path, **with a control**: the identical prompt —
+  `cmd /c echo SHELLRAN > <absolute path>` — **executed and created the file** on a normal call, and
+  on `plan=True` created nothing at all, answering with a plan document. File reads still work, so
+  it is genuinely useful rather than merely inert. Note what it is **not**: it constrains agy's agent
+  loop, so it is agent-enforced like Copilot's and Cursor's modes, **not** an OS boundary — for that,
+  use Codex. Two consequences worth knowing: it survives `--dangerously-skip-permissions` (which the
+  bridge still passes, because dropping it would soft-deny the reads plan mode exists to allow), and
+  it is **mutually exclusive with the slash-command shield** — agy silently disables plan mode when
+  `--disable-slash-commands` is present, so the bridge drops that flag and rejects a prompt whose
+  first token is a slash command instead.
 
 ### Codex — a real sandbox you should use
 
@@ -952,15 +977,19 @@ known-good `agy` version.
 Yes. Pass `model` to `antigravity_ask`/`antigravity_continue` (or per task in `agent_swarm`) — it maps
 to agy's `--model`, taking any slug from `agy models` (e.g. `"gemini-3.1-pro-high"`,
 `"claude-sonnet-4-6"`). Omit it to use the `"model"` field in agy's `settings.json`, which
-defaults to **`gemini-3.6-flash-high`** as of agy 1.1.6 — speed-optimized for cheap tool-calling.
+defaults to **`gemini-3.7-flash-high`** — speed-optimized for cheap tool-calling.
 
 **agy 1.1.5 renamed every model**, replacing the old human labels (`"Gemini 3.1 Pro (High)"`) with
-stable slugs (`gemini-3.1-pro-high`) — the old form is no longer accepted, so pass slugs. **agy 1.1.6
-then added the `gemini-3.6-flash` family and moved the default to it.** The full list, re-checked live
-on 1.1.12 and unchanged since 1.1.6:
-`gemini-3.6-flash-low|medium|high`, `gemini-3.5-flash-low|medium|high`, `gemini-3.1-pro-low|high`,
+stable slugs (`gemini-3.1-pro-high`) — the old form is no longer accepted, so pass slugs. **The
+default has since moved twice**: 1.1.6 added the `gemini-3.6-flash` family and took it, and the
+`gemini-3.7-flash` family arrived by 1.1.16 and took it in turn — a fresh profile with no
+`settings.json` at all now answers `gemini-3.7-flash-high`. The full list, re-checked live on 1.1.20:
+`gemini-3.7-flash-low|medium|high`, `gemini-3.6-flash-low|medium|high`,
+`gemini-3.5-flash-low|medium|high`, `gemini-3.1-pro-low|high`,
 `claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium`. Note the slug bakes in the
-reasoning effort, which is why the flash and pro models appear once per level.
+reasoning effort, which is why the flash and pro models appear once per level. agy self-updates in
+the background, so treat any list written down here — this one included — as a snapshot; `agy models`
+and `antigravity_status` are the live answer.
 
 agy 1.0.5 added `--model`, but through ~1.0.14 switching to a different model in `-p` **hung** the
 call, so earlier bridge versions stayed single-model. **Re-verified on agy 1.0.16 that the hang is
@@ -1085,6 +1114,89 @@ running **serialized** in your real HOME — correct, but without the speedup. W
   so a diagnostic advertised as free would quietly spend a call. The probe is the one bridge call
   that deliberately **omits** `--disable-slash-commands` (a regression test asserts it), and it
   degrades to nothing on older agy rather than reporting a false problem.
+- ✅ **`agent_swarm` honours `sandbox` on Antigravity workers — it used to ignore it.** Every other
+  backend took a per-task `sandbox` policy; Antigravity dropped the key on the floor, so
+  `{"backend": "agy", "sandbox": "read-only"}` was a task that *looked* fenced and ran with nothing
+  holding it back. Plan mode is the first thing agy has that can honour the request, so `"read-only"`
+  now maps onto it, `"danger-full-access"` names the unrestricted posture out loud, and
+  `"workspace-write"` **raises** rather than implying a scoping agy cannot do.
+
+  Verified live on 1.1.20 in the **parallel isolated-HOME path** — the one that builds its own argv
+  rather than going through `_run_agy`, so it had to be threaded explicitly — with both workers in a
+  single swarm running the same `cmd /c echo RAN > <absolute path>`: the `read-only` worker created
+  nothing and returned a plan document, the unfenced one created its file. The version gate and the
+  slash-command guard run at task-normalization time, so a bad plan request fails the whole swarm up
+  front rather than N calls in.
+
+  Two deliberate omissions. **An omitted `sandbox` still leaves an agy worker unrestricted**, unlike
+  every other backend: flipping that default would silently turn existing file-writing swarm tasks
+  into plan documents. And **`schema` is not wired into the swarm at all** — both Antigravity swarm
+  paths read the answer from the isolated *transcript*, where `structured_output` does not exist, so
+  it would mean moving the most load-bearing read path in the swarm onto JSON stdout. The
+  structured-output caveat below is the other half of that reasoning: a schema that follows field
+  order rather than content, run across N parallel workers, is N confidently wrong answers.
+
+- ⚠️ **`schema` returns structured output — and agy fills it in a pass that doesn't re-read the
+  question.** Passing a JSON Schema to `antigravity_ask` / `antigravity_continue` maps to agy 1.1.8's
+  `--json-schema`, and the tool returns agy's `structured_output` — exactly the declared fields, as
+  JSON text you can `json.loads`. Note the prose `response` on the same run is **not** the same
+  thing: it carries the model's raw emission, agy's internal `toolAction` / `toolSummary` keys, and
+  sometimes a sentence of prose ahead of the JSON. A run that yields no structured output **raises**
+  rather than handing you prose to parse.
+
+  The caveat is worth more than the feature. agy populates the schema in a **finishing pass that does
+  not reason about the content again**, so any field the turn never actually established gets guessed
+  from the shape of the schema. Measured on 1.1.20, classifying *"this broke my build and wasted my
+  whole afternoon"*:
+
+  | prompt | schema | result |
+  |---|---|---|
+  | plain classify request | `enum: ["positive","negative"]` | **positive** — 3 runs out of 4 |
+  | plain classify request | same enum, order **reversed** | **negative** — 2 of 2 |
+  | same, plus a `reason` field | `reason` first, then the enum | reason came back *"Completed sentiment classification task."* |
+  | "state the verdict and why, then report it" | the **original, biased** enum | **negative** — 3 of 3 |
+
+  It was following field order, not the sentence. So use `schema` to **shape an answer the turn has
+  already worked out** — extraction, formatting, pulling fields out of something the model just read
+  — and do not delegate the judgment itself to it. Ask for the reasoning in the prompt; the schema is
+  the envelope, not the thinker.
+
+- ✅ **Re-verified on agy 1.1.13–1.1.20 — no code change needed, and two upstream fixes moved
+  *toward* the bridge.** Eight releases of drift, re-checked live on Windows: `antigravity_ask` and
+  `antigravity_continue` both round-tripped through the real argv (the continue pinned its
+  conversation and recalled a codeword), agy's `--output-format json` object still carries
+  `conversation_id` / `status` / `response`, `agy models` still emits `<slug>\t<label>`, the `/usage`
+  quota table still parses into per-family rows, and all three version gates
+  (`supports_json_output`, `supports_disable_slash_commands`, `supports_print_usage`) resolve true.
+  The two changes that touch this bridge both make it *more* correct:
+  - **1.1.18 made a valueless `-p` and a stray trailing argument hard errors.** That is precisely the
+    mis-parse the bridge is built to avoid — `--print --sandbox 'do the task'` used to run with the
+    prompt `--sandbox` and the sandbox silently off. The bridge already passes the prompt as `-p`'s
+    value and already appends `-p` last, so nothing changed here except that agy now enforces the
+    rule instead of failing quietly. Re-verified with a prompt whose first character is a dash.
+  - **Print-mode exit codes got honest, in both directions.** 1.1.18 made a dropped agent stream exit
+    non-zero rather than reporting a clean success with an empty response; 1.1.20 stopped treating
+    benign tool errors and permission denials as fatal. The bridge raises on any non-zero exit, so
+    both edits sharpen a signal it was already trusting.
+
+  Also worth knowing, though nothing here had to move: **1.1.13 fixed two long-standing hazards in
+  exactly the code path this bridge falls back to** — transcript corruption when a background message
+  appended while context compaction was rewriting it (which left JSON that no longer parsed) and
+  unbounded growth of the on-disk conversation database. That fallback is the bridge's most fragile
+  read path, and it is now sturdier upstream. **1.1.14 and 1.1.20 also shifted agy's default
+  permission posture** (workspace reads auto-granted under the default review mode; access outside
+  the workspace narrowed to read-only) — `--dangerously-skip-permissions` stays load-bearing, so the
+  [Security](#security) note is unchanged.
+
+  **Docs-only drift, now fixed:** agy grew the **`gemini-3.7-flash`** family and moved the default
+  onto it, so an untouched install runs `gemini-3.7-flash-high`, not the `gemini-3.6-flash-high` every
+  doc here named (verified in a throwaway HOME with no `settings.json` at all). Nothing broke —
+  validation reads the live list — but the guard test only ever noticed a model agy *dropped*, which
+  is why a whole new family and a moved default sailed through a green suite. A second guard now
+  fails when agy offers a family the docs don't mention. `VERIFIED_AGY_VERSION` → `(1, 1, 20)`.
+  Not adopted, and not exercised beyond confirming agy still lists them: `--json-schema`,
+  1.1.15's `--input-format stream-json` (one process, many turns), `--mode accept-edits|plan`, and
+  1.1.16's `agy mcp` subcommands. Nothing here needs them today.
 - ✅ **Re-verified the rest of agy 1.1.11/1.1.12 — nothing else broke.** The **slash shield still
   holds**: 1.1.11 replaced the silent fall-through for interactive-only commands with an explicit
   refusal that recommends the exact flag this bridge already passes (`agy -p "/clear"` → exit 2,
@@ -1182,7 +1294,7 @@ running **serialized** in your real HOME — correct, but without the speedup. W
   replaced agy's human-readable model labels with stable slugs, and `agy models` reports only those:
   `"Gemini 3.1 Pro (High)"` is now `gemini-3.1-pro-high`, and the Claude entries are
   `claude-sonnet-4-6` and `claude-opus-4-6-thinking` (the mapping is not 1:1 — check
-  `agy models`, or `antigravity_status`, for the current eight). Since the bridge validates `model` against
+  `agy models`, or `antigravity_status`, for the current list). Since the bridge validates `model` against
   `agy models`, an old label is **rejected up front** with the valid list — you lose the call, not
   your money, and never silently run on the wrong model. Pass slugs and you're fine. Nothing in the
   bridge's machinery needed changing (validation was always format-agnostic — which is exactly why

@@ -705,6 +705,225 @@ def test_run_agy_passes_slash_guard(fake_agy_slash, brain_dir, last_conv_file):
 
 
 # --------------------------------------------------------------------------
+# --mode plan  (agy 1.1.12+): the one Antigravity restriction that survives
+# --dangerously-skip-permissions. Live behaviour these tests encode, verified on
+# 1.1.20 / Windows: a file write and a shell command were both refused and
+# diverted into a plan document under agy's brain dir even when the prompt said
+# "do it now, do not plan it", while a file read answered normally; and agy warns
+# "--mode plan has no effect while slash command expansion is disabled" and then
+# runs UNRESTRICTED if --disable-slash-commands is passed alongside it.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "version,expected",
+    [("1.1.12", True), ("1.1.20", True), ("1.1.11", False), ("1.0.9", False), (None, False)],
+)
+def test_supports_plan_mode_gate(monkeypatch, version, expected):
+    """1.1.12 is where --mode started being HONORED in print mode; before it, agy
+    parsed the flag and ignored it. An unreadable version answers False.
+    """
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", None)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: version)
+    assert server.supports_plan_mode() is expected
+
+
+def test_agy_base_args_plan_replaces_slash_shield(monkeypatch):
+    """The exclusivity is the whole point: agy DISABLES plan mode when the slash
+    shield is on, so passing both would hand back an unrestricted run that looks
+    restricted. The shield moves to _guard_plan_mode_prompt instead.
+    """
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)  # shield would otherwise apply
+    args = server._agy_base_args(10, plan=True)
+    assert args[args.index("--mode") + 1] == "plan"
+    assert "--disable-slash-commands" not in args
+
+
+def test_agy_base_args_plan_keeps_skip_permissions(monkeypatch):
+    """Verified live that plan survives --dangerously-skip-permissions. Dropping it
+    would reintroduce 1.1.3's soft-deny and kill the READS plan mode exists to allow.
+    """
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
+    assert "--dangerously-skip-permissions" in server._agy_base_args(10, plan=True)
+
+
+def test_agy_base_args_without_plan_is_unchanged(monkeypatch):
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
+    args = server._agy_base_args(10)
+    assert "--mode" not in args and "--disable-slash-commands" in args
+
+
+def test_build_agy_args_plan_precedes_prompt(monkeypatch):
+    """Same -p rule as every other flag: agy's -p takes the prompt as its VALUE."""
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
+    args, _ = server._build_agy_args("hi", "C:\\ws", continue_conv=False, timeout_s=10, plan=True)
+    assert args.index("--mode") < args.index("-p")
+    assert args[-2:] == ["-p", "hi"]
+
+
+@pytest.mark.parametrize("prompt", ["/schedule nightly build", "/goal", "  /help  "])
+def test_guard_plan_mode_prompt_rejects_leading_command(prompt):
+    """A single-segment leading /token is what agy's expansion actually fires on,
+    and the registered set is side-effecting (`/goal`, `/schedule`).
+    """
+    with pytest.raises(ValueError, match="plan mode cannot run a prompt"):
+        server._guard_plan_mode_prompt(prompt)
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "/etc/hosts is wrong, why?",  # POSIX path: has a second separator
+        "explain /schedule to me",  # not the FIRST token
+        "summarise this repo",
+        "",
+    ],
+)
+def test_guard_plan_mode_prompt_allows_ordinary_prompts(prompt):
+    server._guard_plan_mode_prompt(prompt)  # must not raise
+
+
+def test_guard_plan_mode_prompt_honors_env_opt_in(monkeypatch):
+    """Same deliberate opt-in _agy_base_args honors for callers who WANT expansion."""
+    monkeypatch.setenv("AGY_BRIDGE_ALLOW_SLASH_COMMANDS", "1")
+    server._guard_plan_mode_prompt("/help")  # must not raise
+
+
+def test_check_plan_mode_raises_on_older_agy(monkeypatch):
+    """REFUSES rather than degrading. Every other gate here falls back to a
+    lesser-but-safe path; this one can't, because silently dropping a restriction
+    returns a fully-empowered run to a caller who asked for the opposite.
+    """
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", False)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: "1.1.11")
+    with pytest.raises(ValueError, match="needs agy 1.1.12"):
+        server._check_plan_mode("summarise this repo")
+
+
+def test_check_plan_mode_passes_on_supported_agy(monkeypatch):
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", True)
+    server._check_plan_mode("summarise this repo")  # must not raise
+
+
+def test_run_agy_plan_reaches_argv(fake_agy_slash, brain_dir, last_conv_file):
+    """End-to-end through _run_agy: the flag reaches the real argv, and the shield
+    it replaces is genuinely absent rather than merely reordered.
+    """
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_slash["stdout"] = "a plan"
+    out = server._run_agy("review this", "C:\\ws", continue_conv=False, timeout_s=10, plan=True)
+    assert out == "a plan"
+    argv = fake_agy_slash["args"]
+    assert argv[argv.index("--mode") + 1] == "plan"
+    assert "--disable-slash-commands" not in argv
+    assert "--dangerously-skip-permissions" in argv
+
+
+# --------------------------------------------------------------------------
+# --json-schema  (agy 1.1.8+, same release as --output-format json): the
+# validated object lands in the result's OWN `structured_output` field. Verified
+# live on 1.1.20 that `response` on the same run is NOT a substitute — it carried
+# the model's raw emission, the declared keys plus agy's internal toolAction /
+# toolSummary, and in one run a line of prose ahead of the JSON.
+# --------------------------------------------------------------------------
+
+
+def test_normalize_json_schema_accepts_object():
+    out = server._normalize_json_schema({"type": "object"})
+    assert json.loads(out) == {"type": "object"}
+
+
+def test_normalize_json_schema_accepts_json_text():
+    """A model composing a tool call sends either form."""
+    out = server._normalize_json_schema('  {"type": "object"}  ')
+    assert json.loads(out) == {"type": "object"}
+
+
+@pytest.mark.parametrize("bad", ["not json", "./schema.json", "[1, 2]", "42"])
+def test_normalize_json_schema_rejects_unusable(bad):
+    """A path is refused on purpose: treating a malformed schema as a filename is
+    how you get an unschema'd run that still reports success.
+    """
+    with pytest.raises(ValueError, match="schema must be a JSON object"):
+        server._normalize_json_schema(bad)
+
+
+def test_check_schema_support_raises_below_118(monkeypatch):
+    monkeypatch.setattr(server, "_AGY_JSON_SUPPORT", False)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: "1.1.7")
+    with pytest.raises(ValueError, match="schema needs agy 1.1.8"):
+        server._check_schema_support()
+
+
+def test_build_agy_args_schema_precedes_prompt(monkeypatch):
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", False)
+    args, _ = server._build_agy_args(
+        "hi", "C:\\ws", continue_conv=False, timeout_s=10, schema='{"type":"object"}'
+    )
+    assert args[args.index("--json-schema") + 1] == '{"type":"object"}'
+    assert args.index("--json-schema") < args.index("-p")
+    assert args[-2:] == ["-p", "hi"]
+
+
+def test_structured_answer_returns_the_validated_object():
+    out = server._structured_answer({"structured_output": {"a": 1}}, "c1")
+    assert json.loads(out) == {"a": 1}
+
+
+def test_structured_answer_raises_when_absent():
+    """Never fall back to `response`: the caller is about to json.loads this."""
+    with pytest.raises(RuntimeError, match="no structured_output"):
+        server._structured_answer({"status": "ERROR", "response": "some prose"}, "c1")
+
+
+def test_run_agy_schema_returns_structured_not_response(fake_agy_json, last_conv_file):
+    """End-to-end: the schema run returns structured_output, and the prose response
+    on the same object is ignored rather than concatenated or preferred.
+    """
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(
+        response="prose the caller did not ask for",
+        structured_output={"language": "Python", "files": 7},
+    )
+    out = server._run_agy(
+        "hi", "C:\\ws", continue_conv=False, timeout_s=10, schema='{"type":"object"}'
+    )
+    assert json.loads(out) == {"language": "Python", "files": 7}
+    argv = fake_agy_json["args"]
+    assert argv[argv.index("--json-schema") + 1] == '{"type":"object"}'
+
+
+def test_run_agy_schema_raises_on_plain_text_fallback(fake_agy_json, last_conv_file):
+    """agy ignored the flag and answered plain text. Returning that prose would push
+    the failure onto a caller who is going to parse it.
+    """
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = "just some prose"
+    with pytest.raises(RuntimeError, match="no structured result object"):
+        server._run_agy(
+            "hi", "C:\\ws", continue_conv=False, timeout_s=10, schema='{"type":"object"}'
+        )
+
+
+def test_run_agy_schema_raises_when_result_lacks_structured_output(fake_agy_json, last_conv_file):
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(response="prose")  # no structured_output key
+    with pytest.raises(RuntimeError, match="no structured_output"):
+        server._run_agy(
+            "hi", "C:\\ws", continue_conv=False, timeout_s=10, schema='{"type":"object"}'
+        )
+
+
+def test_run_agy_without_schema_is_unchanged(fake_agy_json, last_conv_file):
+    """The schema path must not disturb the ordinary one."""
+    last_conv_file.write_text(json.dumps({}), encoding="utf-8")
+    fake_agy_json["stdout"] = _json_result(response="ans", structured_output={"a": 1})
+    out = server._run_agy("hi", "C:\\ws", continue_conv=False, timeout_s=10)
+    assert out == "ans"
+    assert "--json-schema" not in fake_agy_json["args"]
+
+
+# --------------------------------------------------------------------------
 # --model plumbing: _build_agy_args / list_agy_models / validate_model
 # --------------------------------------------------------------------------
 
@@ -823,11 +1042,27 @@ def test_validate_model_skips_when_list_unavailable(monkeypatch):
 # that notices. Spends no AI Pro quota (`agy models` is a local subcommand) and
 # skips where agy isn't installed.
 DOCUMENTED_AGY_MODELS = [
-    "gemini-3.6-flash-high",  # 1.1.6's new default (added the gemini-3.6-flash family)
+    "gemini-3.7-flash-high",  # the default an untouched install runs, as of ~1.1.16
+    "gemini-3.6-flash-high",  # 1.1.6's default (added the gemini-3.6-flash family)
     "gemini-3.5-flash-high",
     "gemini-3.1-pro-high",
     "claude-sonnet-4-6",
+    "claude-opus-4-6-thinking",
+    "gpt-oss-120b-medium",
 ]
+
+
+def _model_family(slug: str) -> str:
+    """A model slug minus its reasoning-effort suffix: gemini-3.7-flash-high -> gemini-3.7-flash.
+
+    agy 1.1.5 bakes the effort level into the slug, so one family shows up as up
+    to three entries. The docs deliberately name only the -high variant of each,
+    which is why the coverage test below compares families rather than slugs.
+    """
+    for effort in ("-low", "-medium", "-high"):
+        if slug.endswith(effort):
+            return slug[: -len(effort)]
+    return slug
 
 
 def test_documented_model_slugs_still_accepted_by_live_agy(monkeypatch):
@@ -840,6 +1075,32 @@ def test_documented_model_slugs_still_accepted_by_live_agy(monkeypatch):
         f"docs advertise model(s) agy no longer accepts: {missing}. Live list: {live}. "
         "agy renames models between releases — update the antigravity_ask/continue/"
         "agent_swarm docstrings and README, then this list."
+    )
+
+
+def test_live_agy_model_families_are_all_documented(monkeypatch):
+    """The reverse direction: agy grew a family our docs never mention.
+
+    The test above only notices a model agy DROPPED, which is why agy adding the
+    gemini-3.7-flash family (and moving the default onto it) slipped through a
+    fully green suite and left every doc naming 3.6 as the default. A silently
+    stale default is the more likely drift of the two: agy self-updates in the
+    background, so nothing else in this repo ever fires when it happens.
+
+    Compares families, not slugs, because the docs name only the -high variant of
+    each family on purpose. Skips where agy isn't installed, so CI stays green.
+    """
+    monkeypatch.setattr(server, "_AGY_MODELS_CACHE", None)  # force a fresh read
+    live = server.list_agy_models()
+    if not live:
+        pytest.skip("agy not installed or `agy models` unreadable")
+    documented = {_model_family(m) for m in DOCUMENTED_AGY_MODELS}
+    undocumented = sorted({_model_family(m) for m in live} - documented)
+    assert not undocumented, (
+        f"agy now offers model family/families the docs never mention: {undocumented}. "
+        f"Live list: {live}. Check `agy changelog` for a default-model move too, then "
+        "update the antigravity_ask/continue/agent_swarm docstrings, the README model "
+        "list, and DOCUMENTED_AGY_MODELS."
     )
 
 

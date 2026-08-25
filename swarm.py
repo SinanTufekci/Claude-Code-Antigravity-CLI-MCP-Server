@@ -344,7 +344,9 @@ def _repos(workspaces: list[str]) -> list[str]:
 
 
 # ----------------------------------------------------------------------------- text swarm
-def _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, t0) -> WorkerResult:
+def _run_text_worker_serialized(
+    index, prompt, workspace, model, timeout_s, t0, plan=False
+) -> WorkerResult:
     """One antigravity worker WITHOUT HOME isolation, serialized behind _AGY_LOCK.
 
     The fallback for a platform where isolating HOME hides agy's credentials (see
@@ -361,7 +363,7 @@ def _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, t0) 
 
     try:
         os.makedirs(workspace, exist_ok=True)
-        ans = server._run_agy(prompt, workspace, False, timeout_s, model, pin=False)
+        ans = server._run_agy(prompt, workspace, False, timeout_s, model, plan, pin=False)
         return WorkerResult(
             index, True, answer=ans, elapsed=round(time.time() - t0, 1), workspace=workspace
         )
@@ -371,16 +373,18 @@ def _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, t0) 
         )
 
 
-def _run_text_worker(index, prompt, workspace, model, timeout_s) -> WorkerResult:
+def _run_text_worker(index, prompt, workspace, model, timeout_s, plan=False) -> WorkerResult:
     import server
 
     if not isolation_ok():
-        return _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, time.time())
+        return _run_text_worker_serialized(
+            index, prompt, workspace, model, timeout_s, time.time(), plan
+        )
     home = _make_isolated_home()
     t0 = time.time()
     try:
         os.makedirs(workspace, exist_ok=True)
-        args = server._agy_base_args(timeout_s)
+        args = server._agy_base_args(timeout_s, plan)
         if model:
             args += ["--model", model]
         args += ["-p", prompt]
@@ -428,7 +432,7 @@ def _run_text_worker(index, prompt, workspace, model, timeout_s) -> WorkerResult
             # answer rather than reporting a failure the user can do nothing about.
             _mark_isolation_broken(str(e))
             shutil.rmtree(home, ignore_errors=True)
-            return _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, t0)
+            return _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, t0, plan)
         return WorkerResult(
             index, False, error=str(e), elapsed=round(time.time() - t0, 1), workspace=workspace
         )
@@ -463,13 +467,13 @@ def _watched_serialized_note(index: int, start: float) -> None:
 
 
 def _run_text_worker_watched_serialized(
-    index, prompt, workspace, model, timeout_s, start
+    index, prompt, workspace, model, timeout_s, start, plan=False
 ) -> WorkerResult:
     """Watched worker in serialized mode: real progress state, no live step feed."""
     import swarm_watch
 
     _watched_serialized_note(index, start)
-    res = _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, start)
+    res = _run_text_worker_serialized(index, prompt, workspace, model, timeout_s, start, plan)
     if res.ok:
         swarm_watch.worker_finish(index, "done", res.answer or "", time.time() - start)
     else:
@@ -477,7 +481,9 @@ def _run_text_worker_watched_serialized(
     return res
 
 
-def _run_text_worker_watched(index, prompt, workspace, model, timeout_s) -> WorkerResult:
+def _run_text_worker_watched(
+    index, prompt, workspace, model, timeout_s, plan=False
+) -> WorkerResult:
     import server
     import swarm_watch
 
@@ -485,14 +491,14 @@ def _run_text_worker_watched(index, prompt, workspace, model, timeout_s) -> Work
     if not isolation_ok():
         swarm_watch.worker_update(index, status="working", started=start)
         return _run_text_worker_watched_serialized(
-            index, prompt, workspace, model, timeout_s, start
+            index, prompt, workspace, model, timeout_s, start, plan
         )
     home = _make_isolated_home()
     swarm_watch.worker_update(index, status="working", started=start)
     feed = _Feed(home, index, start)
     try:
         os.makedirs(workspace, exist_ok=True)
-        args = server._agy_base_args(timeout_s)
+        args = server._agy_base_args(timeout_s, plan)
         if model:
             args += ["--model", model]
         args += ["-p", prompt]
@@ -554,7 +560,7 @@ def _run_text_worker_watched(index, prompt, workspace, model, timeout_s) -> Work
             _mark_isolation_broken(str(e))
             shutil.rmtree(home, ignore_errors=True)
             return _run_text_worker_watched_serialized(
-                index, prompt, workspace, model, timeout_s, start
+                index, prompt, workspace, model, timeout_s, start, plan
             )
         swarm_watch.worker_finish(index, "error", str(e), time.time() - start)
         return WorkerResult(
@@ -869,9 +875,15 @@ def _normalize_tasks(tasks) -> list[dict]:
     """Validate + canonicalize agent_swarm tasks into a uniform list.
 
     Each task is {backend, prompt, workspace?, sandbox?, model?}. backend accepts a
-    few aliases; `sandbox` applies to Codex, Copilot, Cursor and Grok (agy has no
-    sandbox), while `model` applies to every backend (agy's --model works in print
-    mode as of 1.0.16). Raises ValueError naming the offending index on bad input.
+    few aliases; `model` applies to every backend (agy's --model works in print mode
+    as of 1.0.16). `sandbox` applies to every backend too, now that Antigravity has
+    plan mode to honour "read-only" with — it used to be silently ignored there, so
+    an agy task could ask to be fenced and run unrestricted anyway. What each policy
+    means still differs per backend: Codex's is an enforced OS sandbox, Grok's is on
+    Linux/macOS only, and Copilot's, Cursor's and Antigravity's are agent-level. See
+    server.plan_from_sandbox for which policies agy can and cannot honour.
+
+    Raises ValueError naming the offending index on bad input.
     """
     if not isinstance(tasks, list):
         raise ValueError("tasks must be a list of {backend, prompt, ...} objects")
@@ -892,6 +904,7 @@ def _normalize_tasks(tasks) -> list[dict]:
         workspace = os.path.abspath(ws) if ws else os.getcwd()
         sandbox = None
         model = None
+        plan = False  # antigravity only; see the else-branch below
         if backend == "codex":
             import codex_bridge
 
@@ -916,10 +929,20 @@ def _normalize_tasks(tasks) -> list[dict]:
             sandbox = t.get("sandbox") or grok_bridge.DEFAULT_SANDBOX
             grok_bridge.validate_sandbox(sandbox)  # fail fast on a bad policy
             model = grok_bridge.validate_model(t.get("model") or None)  # fail fast on a typo
-        else:  # antigravity: no sandbox, but --model works in print mode (agy 1.0.16)
+        else:  # antigravity
             import server
 
             model = server.validate_model(t.get("model") or None)  # fail fast on a typo
+            sandbox = t.get("sandbox") or None  # omitted stays unrestricted; see below
+            try:
+                plan = server.plan_from_sandbox(sandbox)
+                if plan:
+                    # Fail the whole swarm here rather than N calls in: this checks
+                    # the agy version gate and the slash-command guard that plan mode
+                    # needs in place of --disable-slash-commands.
+                    server._check_plan_mode(str(prompt))
+            except ValueError as e:
+                raise ValueError(f"task {i}: {e}") from e
         out.append(
             {
                 "backend": backend,
@@ -927,6 +950,7 @@ def _normalize_tasks(tasks) -> list[dict]:
                 "workspace": workspace,
                 "sandbox": sandbox,
                 "model": model,
+                "plan": plan,
             }
         )
     return out
@@ -1247,7 +1271,7 @@ def swarm_agents(
             fn = _run_grok_worker_watched if watch else _run_grok_worker
             return fn(i, t["prompt"], t["workspace"], t["sandbox"], t["model"], timeout_s)
         fn = _run_text_worker_watched if watch else _run_text_worker
-        return fn(i, t["prompt"], t["workspace"], t["model"], timeout_s)
+        return fn(i, t["prompt"], t["workspace"], t["model"], timeout_s, t["plan"])
 
     results: list[Optional[WorkerResult]] = [None] * n
     with ThreadPoolExecutor(max_workers=max(1, max_concurrency)) as ex:

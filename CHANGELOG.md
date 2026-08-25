@@ -10,6 +10,106 @@ summary.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-08-25
+
+### Added
+
+- **`plan=True` on `antigravity_ask` / `antigravity_continue` — the first Antigravity restriction
+  that actually holds.** It maps to agy's `--mode plan` (1.1.12+): agy investigates and writes an
+  implementation plan into its own directory instead of editing files or running commands, while
+  file reads keep working. That combination is what makes it worth having — `--sandbox` and 1.1.3's
+  headless permission gate both restrict by breaking the run, and this one doesn't.
+
+  Verified on agy 1.1.20 through the bridge's own code path, **with a control**, because "no file
+  appeared" proves nothing on its own: the identical prompt — run `cmd /c echo SHELLRAN >
+  <absolute path>` — **executed and created the file** on a normal call, and created nothing under
+  `plan=True`, which answered with a plan document. It holds even though the bridge still passes
+  `--dangerously-skip-permissions`, and even when the prompt insists ("do it now", "do not plan it").
+
+  Three things it deliberately is not:
+  - **Not an OS boundary.** It constrains agy's agent loop, so it is agent-enforced like Copilot's
+    and Cursor's modes. Treat it as a strong default for "read this repo, don't touch it", not as a
+    boundary against a hostile prompt — `codex_ask(sandbox="read-only")` is the real one.
+  - **Not silently best-effort.** Below agy 1.1.12 `--mode` parses and is then ignored in print mode,
+    so a plan request there would return a fully-empowered run reporting success. The bridge
+    **refuses** instead. Every other version gate here degrades to a lesser-but-safe path; a
+    restriction cannot.
+  - **Not compatible with the slash-command shield.** agy disables plan mode when
+    `--disable-slash-commands` is present (it warns, then runs unrestricted), so the bridge drops
+    that flag for plan calls and enforces the equivalent client-side: a prompt whose first token is a
+    single-segment slash command is rejected up front, while a POSIX path like `/etc/hosts …` still
+    passes. `AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1` opts out, as it already did.
+
+  Not wired into `agent_swarm` or `antigravity_image` yet: the swarm's task schema is shared across
+  six backends, and image generation exists to write a file.
+
+- **`agent_swarm` honours `sandbox` on Antigravity workers.** Every other backend took a per-task
+  `sandbox` policy and Antigravity dropped the key on the floor, so
+  `{"backend": "agy", "sandbox": "read-only"}` described a fenced worker and ran an unrestricted one.
+  Now `"read-only"` maps to plan mode, `"danger-full-access"` names the unrestricted posture out
+  loud, and `"workspace-write"` raises rather than implying a write scoping agy does not have.
+
+  Verified live on 1.1.20 in the parallel isolated-HOME path — which builds its own argv instead of
+  going through `_run_agy`, so plan had to be threaded through all four worker functions — with both
+  workers in one swarm running the same `cmd /c echo RAN > <absolute path>`: the fenced worker
+  created nothing and returned a plan, the unfenced one created its file. The version gate and slash
+  guard run at task-normalization time, so a bad request fails the swarm up front rather than N calls
+  in.
+
+  **An omitted `sandbox` still leaves an Antigravity worker unrestricted**, unlike every other
+  backend. Flipping that default would silently turn existing file-writing swarm tasks into plan
+  documents, so it is left alone and documented instead.
+
+- **`schema` on `antigravity_ask` / `antigravity_continue` — structured output instead of prose.**
+  Pass a JSON Schema (an object, or its JSON text) and the tool returns agy's validated
+  `structured_output` as JSON text, via agy 1.1.8's `--json-schema`. The schema goes across as inline
+  argv rather than a temp file, so there is nothing to quote and nothing to clean up. `response` on
+  the same run is deliberately NOT used as a fallback: verified on 1.1.20 that it carries the model's
+  raw emission plus agy's internal `toolAction` / `toolSummary` keys, and sometimes a line of prose
+  ahead of the JSON. A run that yields no structured output raises, since the caller is about to
+  parse what comes back. Gated on `supports_json_output()` — 1.1.8 shipped `--json-schema` and the
+  result object together — and refuses below it rather than silently answering in prose.
+
+  **Read the caveat before using it for a judgment.** agy fills the schema in a finishing pass that
+  does not reason about the content again, so a field the turn never established is guessed from the
+  schema's shape. Classifying "this broke my build and wasted my whole afternoon" with
+  `enum: ["positive","negative"]` returned **positive** in 3 runs of 4; reversing the enum to
+  `["negative","positive"]` returned **negative** in 2 of 2. Adding a `reason` field did not help —
+  it came back "Completed sentiment classification task." Asking the prompt to state the verdict and
+  why, with the original biased enum, was correct 3 of 3. Use `schema` to shape an answer the turn
+  has already produced; don't delegate the thinking to it. Documented in the tool docstring and the
+  README.
+
+- **A guard test for the drift that got through.** `test_documented_model_slugs_still_accepted_by_live_agy`
+  only ever noticed a model agy *dropped*, which is why a whole new model family and a moved default
+  sailed past a fully green suite. `test_live_agy_model_families_are_all_documented` now fails when
+  `agy models` offers a family the docs don't mention. It compares families rather than slugs, since
+  the docs deliberately name only the `-high` variant of each, and skips where agy isn't installed so
+  CI stays green.
+
+### Changed
+
+- **Re-verified against agy 1.1.20** (was 1.1.12), so `VERIFIED_AGY_VERSION` moves to `(1, 1, 20)`
+  and the startup/status "newer than verified" warning stops firing on a current agy. No code change
+  was needed: ask and continue both round-tripped through the real argv, the `--output-format json`
+  object still carries `conversation_id` / `status` / `response`, `agy models` still emits
+  `<slug>\t<label>`, the `/usage` quota table still parses, and every version gate resolves true.
+
+  Two upstream changes moved *toward* the bridge rather than away. **1.1.18** made a valueless `-p`
+  and a stray trailing argument hard errors — exactly the mis-parse `_agy_base_args`' ORDER MATTERS
+  note exists to avoid, now enforced by agy instead of failing silently (re-verified with a prompt
+  whose first character is a dash). And print-mode **exit codes got honest in both directions**:
+  1.1.18 made a dropped agent stream exit non-zero instead of reporting a clean success with an empty
+  response, while 1.1.20 stopped treating benign tool errors and permission denials as fatal. The
+  bridge raises on any non-zero exit, so both sharpen a signal it already trusted.
+
+- **Docs: agy's default model moved to `gemini-3.7-flash-high`.** agy grew the `gemini-3.7-flash`
+  family and put the default on it, so an untouched install no longer runs the
+  `gemini-3.6-flash-high` that every docstring, the README, and the tool help all named. Verified on
+  a throwaway profile with no `settings.json` at all. Nothing broke — `validate_model` reads the live
+  `agy models` list rather than a baked-in one — but a caller reading the tool docs was reasoning
+  about the wrong model, and the README badge was staler still at 1.1.10.
+
 ## [0.26.0] - 2026-08-13
 
 **Two new backends — and both are unverified.** Grok Build (xAI) and Kimi Code (Moonshot) join
@@ -1168,7 +1268,8 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.24.0...v0.25.0

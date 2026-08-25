@@ -23,7 +23,7 @@ must have logged in interactively at least once via the Antigravity IDE or
 `agy -i`. Uses the same AI Pro quota. The bridge itself only does cross-
 platform filesystem reads under `~/.gemini/antigravity-cli/`.
 
-Model: defaults to agy's settings.json "model" field (e.g. gemini-3.6-flash-high).
+Model: defaults to agy's settings.json "model" field (e.g. gemini-3.7-flash-high).
 agy 1.0.5 added a --model flag (and a `models` subcommand); through
 ~1.0.14 switching to a DIFFERENT model in -p HUNG the call (verified on 1.0.5:
 the active label returned in seconds, any other hung >60s), so the bridge kept
@@ -43,17 +43,21 @@ unchecked. `agy models` itself must be
 run with stdin closed (it blocks on an interactive terminal otherwise), same as
 -p is spawned with DEVNULL stdin.
 
-Model SLUGS (agy 1.1.5, list re-checked live on 1.1.12) — the label format CHANGED
+Model SLUGS (agy 1.1.5, list re-checked live on 1.1.20) — the label format CHANGED
 and every old example is now invalid. 1.1.5 introduced "stable, user-facing model
 slugs" that the /model picker shows and --model accepts, and `agy models` emits
 those slugs (bare through 1.1.10; as `<slug>\t<human label>` from 1.1.11 on — see
-_parse_models_output). The live list (re-read on 1.1.12, unchanged since 1.1.6) is:
-gemini-3.6-flash-{low,medium,high},
+_parse_models_output). The live list (re-read on 1.1.20) is:
+gemini-3.7-flash-{low,medium,high}, gemini-3.6-flash-{low,medium,high},
 gemini-3.5-flash-{low,medium,high}, gemini-3.1-pro-{low,high}, claude-sonnet-4-6,
 claude-opus-4-6-thinking, gpt-oss-120b-medium — 1.1.6 ADDED the gemini-3.6-flash
-family and moved the settings.json default to Gemini 3.6 Flash (High) (verified
-live; both the default path and `--model gemini-3.6-flash-high` round-tripped
-clean, and the JSONL + SQLite read paths still match its unchanged schema). The old
+family and moved the settings.json default to it; the gemini-3.7-flash family then
+arrived by 1.1.16 and took the default with it. A profile with NO settings.json at
+all answers `-p "/model"` with gemini-3.7-flash-high (verified live on 1.1.20 in a
+throwaway HOME), so that — not 3.6 — is what an untouched install now runs. Neither
+move needed a code change, because validate_model reads the live list rather than
+a baked-in one; what rots is precisely this paragraph, and a docstring naming a
+superseded default is how a caller ends up reasoning about the wrong model. The old
 human labels ("Gemini 3.5 Flash (High)", "Claude Sonnet 4.6 (Thinking)") are GONE
 from the list, so
 validate_model rejects them — verified live on 1.1.5: the old label raised
@@ -115,8 +119,13 @@ NOT affect the bridge. `-p` is spawned with DEVNULL stdin, and the request-revie
 approval gate only engages on an INTERACTIVE stdin: given EOF-on-stdin, print mode
 still auto-executes every tool call with no prompt (re-verified on 1.1.0 — a
 file-writing task completed and wrote its file in ~36 s, exit 0, identically with
-and without `--mode accept-edits`). So the bridge keeps NOT passing `--mode`; the
+and without `--mode accept-edits`). So the bridge kept NOT passing `--mode`; the
 `request-review` toolPermission agy has logged since 1.0.5 stays a no-op for -p.
+SUPERSEDED IN PART by 1.1.12, which fixed `--mode` being ignored in headless -p
+entirely — which is why that 1.1.0 test could not have shown anything else. The
+bridge now passes `--mode plan` when a caller opts in, and only then; see the
+plan-mode paragraph at the end of the SECURITY note. `accept-edits` stays
+unpassed, since --dangerously-skip-permissions already auto-approves everything.
 Full compat re-verified on 1.1.0 via the bridge itself: ask + conversation-pinned
 continue round-trips return clean over stdout, and base dir /
 last_conversations.json / JSONL-primary transcript are all intact (SQLite
@@ -384,10 +393,31 @@ gets blocked and stalls print mode (it returned "Error: timeout waiting for
 response", exit 1, having executed nothing), while write_to_file still runs under
 --sandbox and still lands OUTSIDE the declared workspace (exit 0). The new 1.1.0
 `--mode accept-edits` and `--sandbox` coexist without error, but neither makes -p
-safe. For both reasons the bridge deliberately does NOT pass --sandbox. There is
-still no agy flag that makes print mode both safe and useful: 1.1.3's headless
-permission gate is the closest thing, and it lands on the useless side of that
-line (see the headless-permissions note above).
+safe. For both reasons the bridge deliberately does NOT pass --sandbox. Of agy's own
+knobs, 1.1.3's headless permission gate is the closest thing to safe-and-useful,
+and it lands on the useless side of that line (see the headless-permissions note
+above).
+
+--mode plan (agy 1.1.12+) IS the exception, and it is opt-in per call rather than
+part of the posture above. Verified on 1.1.20 through this bridge, with a control
+that makes the claim falsifiable: the same prompt -- run `cmd /c echo SHELLRAN >
+<absolute path>` -- EXECUTED and created the file on a normal call, and created
+nothing at all under plan=True, which answered with a plan document written into
+agy's own brain dir instead. A file read still answered normally, so unlike
+--sandbox and unlike the 1.1.3 gate this restricts without disabling. It also
+survives --dangerously-skip-permissions, which the bridge keeps passing (dropping
+it would soft-deny the very reads plan mode exists to allow).
+
+Do not oversell it. Plan mode constrains agy's AGENT LOOP, so it is enforced the
+way Copilot's and Cursor's modes are and not the way codex's seatbelt/landlock
+sandbox is: it is a strong default for "look at this repo but don't touch it", not
+a boundary to put in front of a hostile prompt. For that, use codex_ask with
+sandbox="read-only". And it costs the slash shield: agy refuses the combination
+with --disable-slash-commands, printing "--mode plan has no effect while slash
+command expansion is disabled" and then running UNRESTRICTED -- the exact
+looks-restricted-but-isn't outcome plan mode exists to prevent -- so the bridge
+drops that flag and enforces the equivalent client-side in
+_guard_plan_mode_prompt.
 
 So `workspace` is only a starting context, NOT a security boundary:
 every call effectively runs arbitrary code with your privileges. Only invoke
@@ -415,7 +445,7 @@ import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from fastmcp import Context, FastMCP
 
@@ -491,7 +521,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.26.0"
+__version__ = "0.27.0"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -523,7 +553,22 @@ _AGY_LOCK = threading.Lock()
 # Latest agy version the bridge's state-file assumptions were verified against.
 # Newer agy releases may change paths/schemas (the SQLite migration is the known
 # risk), so we warn at startup if the installed agy is newer than this.
-VERIFIED_AGY_VERSION = (1, 1, 12)
+#
+# 1.1.20 re-verification (live, Windows): ask and continue both round-tripped
+# through _run_agy with the real argv, the `--output-format json` object still
+# carries conversation_id/status/response, `agy models` still emits <slug>\t<label>,
+# the `/usage` quota table still parses, and supports_json_output /
+# supports_disable_slash_commands / supports_print_usage all resolve True. Two
+# upstream changes moved TOWARD this bridge's assumptions rather than away:
+# 1.1.18 made a dropped print-mode stream exit non-zero instead of reporting a
+# silent empty success, and 1.1.20 stopped treating benign tool errors and
+# permission denials as fatal -- so `returncode != 0` is now a truer failure
+# signal than it was when it was first relied on. 1.1.18 also made a valueless
+# `-p` and a stray trailing argument hard errors, which is exactly the mis-parse
+# _agy_base_args' ORDER MATTERS note was written to avoid; the prompt is still
+# `-p`'s value and still goes last (verified with a prompt whose first character
+# is a dash).
+VERIFIED_AGY_VERSION = (1, 1, 20)
 
 # First agy version whose print mode understands `--output-format json` (1.1.8).
 # Below this the flag is unknown to agy's parser, so the bridge must not pass it
@@ -542,6 +587,17 @@ SLASH_COMMANDS_MIN_VERSION = (1, 1, 9)
 # /hooks, /help, /config, /changelog). This is what makes the quota rows in
 # antigravity_status free. See supports_print_usage.
 USAGE_PRINT_MIN_VERSION = (1, 1, 11)
+
+# First agy version that HONORS `--mode` in headless print mode (1.1.12). The flag
+# parses on older builds and does nothing there -- 1.1.12's changelog says it
+# plainly: "--mode being ignored in headless -p runs, where a valid value such as
+# accept-edits or plan was never applied and an unrecognized value produced no
+# warning at all." That is why plan mode is GATED rather than best-effort. Every
+# other gate here degrades to a lesser-but-safe path when it answers False; this
+# one cannot, because plan mode is a RESTRICTION. Silently dropping it would hand
+# back a fully-empowered run to a caller who asked for a look-but-don't-touch one,
+# reporting success either way. See supports_plan_mode.
+PLAN_MODE_MIN_VERSION = (1, 1, 12)
 
 # Poll window for the transcript/conversation-id to appear after agy exits.
 # agy has already returned 0 by the time we read, so the common case resolves
@@ -1332,6 +1388,192 @@ def supports_disable_slash_commands() -> bool:
         return _AGY_SLASH_GATE
 
 
+# Whether the installed agy HONORS `--mode` in print mode. Cached for the process,
+# like the gates above.
+_AGY_PLAN_GATE: Optional[bool] = None
+_AGY_PLAN_GATE_LOCK = threading.Lock()
+
+
+def supports_plan_mode() -> bool:
+    """True if this agy honors `--mode plan` in print mode (1.1.12+).
+
+    An unparseable/missing version answers False, and callers must then REFUSE the
+    request rather than run it unrestricted -- see PLAN_MODE_MIN_VERSION and
+    _check_plan_mode. Cached for the process.
+    """
+    global _AGY_PLAN_GATE
+    with _AGY_PLAN_GATE_LOCK:
+        if _AGY_PLAN_GATE is None:
+            version = _parse_agy_version(_get_agy_version() or "")
+            _AGY_PLAN_GATE = version is not None and version >= PLAN_MODE_MIN_VERSION
+        return _AGY_PLAN_GATE
+
+
+def _guard_plan_mode_prompt(prompt: str) -> None:
+    """Raise if agy's slash expansion would eat `prompt` on a plan-mode run.
+
+    Plan mode and `--disable-slash-commands` are MUTUALLY EXCLUSIVE: agy prints
+    "warning: --mode plan has no effect while slash command expansion is disabled"
+    and runs with plan mode OFF (verified on 1.1.20 -- the run came back
+    unrestricted). So a plan-mode call cannot carry the bridge's usual slash
+    shield, and the shield has to move here, client-side.
+
+    The rule mirrors agy's own trigger: expansion fires when the prompt's FIRST
+    token names a registered command, and a command is a single segment
+    ("/schedule"), where a POSIX path meant literally almost always carries a
+    second separator ("/etc/hosts …"). So a leading single-segment /token is
+    refused and everything else passes. Refusing is the right failure here: the
+    registered set includes side-effecting commands (`/goal` starts an autonomous
+    long-running task, `/schedule` creates cron jobs) and bridge prompts routinely
+    carry text the caller did not author. A false positive costs a rephrase; a
+    false negative runs someone else's command.
+
+    Skipped when AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1 -- the same deliberate opt-in
+    _agy_base_args honors for callers who WANT `-p "/my-skill <args>"` to invoke a
+    skill.
+    """
+    if _env_truthy("AGY_BRIDGE_ALLOW_SLASH_COMMANDS"):
+        return
+    stripped = prompt.strip()
+    first = stripped.split(maxsplit=1)[0] if stripped else ""
+    if first.startswith("/") and "/" not in first[1:] and "\\" not in first:
+        raise ValueError(
+            f"plan mode cannot run a prompt starting with {first!r}: agy expands a "
+            "leading slash command instead of sending it to the model, and plan mode "
+            "is incompatible with the --disable-slash-commands shield that normally "
+            "blocks that. Rephrase so the prompt does not begin with a command (or "
+            "set AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1 to opt in deliberately)."
+        )
+
+
+def plan_from_sandbox(sandbox: Optional[str]) -> bool:
+    """Map agent_swarm's per-task `sandbox` onto agy's plan mode.
+
+    Every other backend in a swarm takes a `sandbox` policy, and Antigravity used
+    to be the one that silently IGNORED it — so a task written as
+    {"backend": "agy", "sandbox": "read-only"} ran completely unrestricted while
+    reading as though it were fenced. Plan mode is the first thing agy has that can
+    honour that request, so "read-only" now maps onto it.
+
+    The policies agy cannot honour are refused rather than approximated:
+
+    * "read-only"          -> plan mode. Agent-enforced, not an OS boundary; see
+                              _agy_base_args and the module SECURITY note.
+    * "danger-full-access" -> no restriction, which is what agy does anyway. Saying
+                              so explicitly is the point of the name.
+    * None (omitted)       -> no restriction. Antigravity's long-standing swarm
+                              default, deliberately left alone: flipping it would
+                              turn every existing file-writing swarm task into a
+                              plan document.
+    * "workspace-write"    -> ValueError. agy has NO write scoping to offer: under
+                              its own --sandbox the model still wrote a file
+                              OUTSIDE the declared workspace (re-verified on 1.1.0),
+                              so accepting this would promise a fence that does not
+                              exist. The other backends really do scope writes;
+                              quietly treating agy's as equivalent is exactly the
+                              confusion this function was added to end.
+    """
+    if sandbox is None or sandbox == "danger-full-access":
+        return False
+    if sandbox == "read-only":
+        return True
+    if sandbox == "workspace-write":
+        raise ValueError(
+            "antigravity cannot scope writes to a workspace, so sandbox="
+            "'workspace-write' would promise a fence agy does not have (under its own "
+            "--sandbox it still wrote outside the workspace). Use 'read-only' for plan "
+            "mode — agy investigates and writes a plan instead of touching anything — "
+            "or 'danger-full-access' to state plainly that this worker is unrestricted."
+        )
+    raise ValueError(
+        f"unknown sandbox {sandbox!r} for antigravity; expected 'read-only' or "
+        "'danger-full-access' (or omit it)"
+    )
+
+
+def _check_plan_mode(prompt: str) -> None:
+    """Validate a plan-mode request before any quota is spent."""
+    if not supports_plan_mode():
+        found = _get_agy_version() or "unknown"
+        raise ValueError(
+            f"plan=True needs agy {'.'.join(map(str, PLAN_MODE_MIN_VERSION))}+ "
+            f"(found {found}). Older agy accepts --mode and then ignores it in print "
+            "mode, so the run would come back fully empowered while reporting "
+            "success -- the one failure a restriction must not have. Upgrade agy, or "
+            "call without plan."
+        )
+    _guard_plan_mode_prompt(prompt)
+
+
+def _normalize_json_schema(schema: Union[dict, str]) -> str:
+    """agy's `--json-schema` argument as text, or raise on something unusable.
+
+    Accepts the object form (what an MCP client naturally sends) and pre-encoded
+    JSON text, because a model composing a tool call produces either. agy also
+    accepts a PATH to a schema file; the bridge deliberately does not, so a string
+    that is not JSON is a typo to report rather than a filename to go hunting for
+    — silently treating a malformed schema as a path is how you get an
+    unschema'd run that still reports success.
+    """
+    if isinstance(schema, str):
+        text = schema.strip()
+        try:
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"schema must be a JSON object or its JSON text ({exc}). A file path "
+                "is not accepted here — pass the schema itself."
+            ) from exc
+    else:
+        parsed = schema
+        text = json.dumps(schema)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"schema must be a JSON object, not {type(parsed).__name__}")
+    return text
+
+
+def _check_schema_support() -> None:
+    """Refuse a schema request on an agy that has no `--json-schema`.
+
+    1.1.8 added the flag alongside `--output-format json`, so supports_json_output()
+    is exactly the right gate — below it the bridge is on the plain-text stdout
+    path, where there is no result object to carry structured_output. Refusing
+    beats degrading for the same reason plan mode refuses: the caller is going to
+    parse what comes back, and prose that isn't the requested shape fails at their
+    end instead of ours.
+    """
+    if not supports_json_output():
+        found = _get_agy_version() or "unknown"
+        raise ValueError(
+            f"schema needs agy {'.'.join(map(str, JSON_OUTPUT_MIN_VERSION))}+ "
+            f"(found {found}), which is where --json-schema and the structured result "
+            "object arrived. Upgrade agy, or call without schema."
+        )
+
+
+def _structured_answer(result: dict, conv_id: str) -> str:
+    """The validated `structured_output` object of a schema run, as JSON text.
+
+    agy puts the schema-conforming object in its OWN field and leaves `response`
+    alone, and the two are not interchangeable: verified on 1.1.20 that `response`
+    on a schema run carries the model's raw emission — the same keys plus agy's own
+    `toolAction`/`toolSummary`, and in one run a line of prose ahead of the JSON —
+    while `structured_output` was exactly the declared fields. So a missing
+    structured_output RAISES rather than falling back to `response`; a caller that
+    asked for a schema is about to json.loads this.
+    """
+    structured = result.get("structured_output")
+    if structured is None:
+        status = result.get("status")
+        raise RuntimeError(
+            "agy returned no structured_output for a --json-schema run"
+            + (f" (status={status})" if status else "")
+            + f" in conversation {conv_id or 'unknown'}. The schema may be invalid, or "
+            "this agy may not honour the flag."
+        )
+    return json.dumps(structured, ensure_ascii=False)
+
+
 # Whether this agy answers `-p "/usage"` itself instead of sending it to a model.
 # Cached for the process, like the gates above.
 _AGY_USAGE_GATE: Optional[bool] = None
@@ -1623,7 +1865,7 @@ def validate_model(model: Optional[str]) -> Optional[str]:
     return model
 
 
-def _agy_base_args(timeout_s: int) -> list[str]:
+def _agy_base_args(timeout_s: int, plan: bool = False) -> list[str]:
     """agy's argv prefix: binary, print deadline, and the headless permission opt-out.
 
     --dangerously-skip-permissions is REQUIRED as of agy 1.1.3, which stopped
@@ -1654,9 +1896,29 @@ def _agy_base_args(timeout_s: int) -> list[str]:
 
     Set AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1 to keep agy's expansion — the deliberate
     opt-in for callers who WANT `-p "/my-skill <args>"` to invoke a skill.
+
+    `plan` adds agy 1.1.12's `--mode plan`, and it REPLACES the slash shield rather
+    than joining it: agy refuses the combination, printing "warning: --mode plan has
+    no effect while slash command expansion is disabled" and then running with plan
+    mode off. Passing both would therefore produce exactly the outcome plan mode
+    exists to prevent — an unrestricted run that looks restricted — so the flags are
+    exclusive here and _guard_plan_mode_prompt carries the shield client-side
+    instead. Gate on supports_plan_mode() and validate via _check_plan_mode BEFORE
+    calling; below 1.1.12 agy parses --mode and ignores it in print mode.
+
+    --dangerously-skip-permissions STAYS in plan mode, which sounds contradictory
+    and is not: verified on 1.1.20 that plan survives it. A file write and a shell
+    command were both refused and diverted into a plan artifact under agy's own
+    brain dir even when the prompt insisted ("do it now", "do not plan it"), while
+    a file READ answered normally. Dropping the skip flag would instead reintroduce
+    1.1.3's soft-deny and kill the reads plan mode exists to allow. Note what this
+    does and does not buy: it is agent-enforced, like Copilot's and Cursor's modes,
+    NOT an OS boundary — see the SECURITY note in the module docstring.
     """
     args = [AGY_BIN, "--print-timeout", f"{timeout_s}s", "--dangerously-skip-permissions"]
-    if supports_disable_slash_commands() and not _env_truthy("AGY_BRIDGE_ALLOW_SLASH_COMMANDS"):
+    if plan:
+        args.extend(["--mode", "plan"])
+    elif supports_disable_slash_commands() and not _env_truthy("AGY_BRIDGE_ALLOW_SLASH_COMMANDS"):
         args.append("--disable-slash-commands")
     return args
 
@@ -1668,6 +1930,8 @@ def _build_agy_args(
     timeout_s: int,
     model: Optional[str] = None,
     output_format: Optional[str] = None,
+    plan: bool = False,
+    schema: Optional[str] = None,
 ) -> tuple[list[str], Optional[str]]:
     """Build agy's argv and resolve the pinned conversation id for continue mode.
 
@@ -1688,9 +1952,16 @@ def _build_agy_args(
     sandbox-blocked terminal run writes no JSONL transcript for us to read. No agy
     flag makes print mode safe; see the module docstring's SECURITY note.
     """
-    args = _agy_base_args(timeout_s)
+    args = _agy_base_args(timeout_s, plan)
     if output_format:
         args.extend(["--output-format", output_format])
+    if schema:
+        # agy 1.1.8's --json-schema, same release as --output-format json. Pairs with
+        # either JSON form: on "json" the validated object lands in the result's
+        # structured_output field, on "stream-json" in the terminal result event.
+        # Passed as inline text rather than a temp file (agy accepts both) — argv is
+        # a list, so there is no quoting to get wrong and no file to clean up.
+        args.extend(["--json-schema", schema])
     if model:
         args.extend(["--model", model])
     pinned_conv: Optional[str] = None
@@ -1715,6 +1986,8 @@ def _run_agy(
     continue_conv: bool,
     timeout_s: int,
     model: Optional[str] = None,
+    plan: bool = False,
+    schema: Optional[str] = None,
     pin: bool = True,
 ) -> str:
     """Run one agy print-mode call under _AGY_LOCK and return its answer.
@@ -1735,6 +2008,8 @@ def _run_agy(
         timeout_s,
         model,
         output_format="json" if use_json else None,
+        plan=plan,
+        schema=schema,
     )
 
     with _AGY_LOCK:
@@ -1783,6 +2058,13 @@ def _run_agy(
         # A None result means agy gave us plain text after all (an agy that ignored
         # the flag), which falls through to the text path below unchanged.
         result = _parse_json_result(stdout_answer) if use_json else None
+        if schema is not None and result is None:
+            raise RuntimeError(
+                "agy produced no structured result object for a --json-schema run "
+                "(it fell back to plain text). The schema contract cannot be met, and "
+                "returning prose to a caller that asked for a shape would fail at their "
+                "end instead of here."
+            )
         if result is not None:
             conv_id = result.get("conversation_id") or ""
             if conv_id:
@@ -1790,6 +2072,10 @@ def _run_agy(
                     _record_conv_id(workspace, conv_id)
                 pinned_conv = pinned_conv or conv_id
             status = result.get("status")
+            if schema is not None:
+                # The schema run's contract is structured_output, not `response` —
+                # see _structured_answer for why the two are not interchangeable.
+                return _structured_answer(result, conv_id)
             answer = (result.get("response") or "").strip()
             log.debug(
                 "agy json result: status=%s conv=%s answer_chars=%d",
@@ -2709,6 +2995,8 @@ def _run_agy_watched(
     continue_conv: bool,
     timeout_s: int,
     model: Optional[str] = None,
+    plan: bool = False,
+    schema: Optional[str] = None,
 ) -> str:
     """Like _run_agy, but open a live browser "watch" view. EXPERIMENTAL.
 
@@ -2733,6 +3021,8 @@ def _run_agy_watched(
         timeout_s,
         model,
         output_format="stream-json" if use_stream else None,
+        plan=plan,
+        schema=schema,
     )
 
     with _AGY_LOCK:
@@ -2797,6 +3087,14 @@ def _run_agy_watched(
             if stream.conv_id:
                 _record_conv_id(workspace, stream.conv_id)
             if stream.result is not None:
+                if schema is not None:
+                    try:
+                        answer = _structured_answer(stream.result, stream.conv_id or "")
+                    except RuntimeError:
+                        _watch_finish(rid, "error", "(no structured output)", time.time() - start)
+                        raise
+                    _watch_finish(rid, "done", answer, time.time() - start)
+                    return answer
                 answer = (stream.result.get("response") or "").strip()
                 status = stream.result.get("status")
                 if answer:
@@ -2813,6 +3111,17 @@ def _run_agy_watched(
                     )
             # No usable result event (agy ignored the flag, or died mid-stream):
             # fall through to the transcript scrape below, exactly as older agy does.
+
+        if schema is not None:
+            # The transcript scrape below can only ever produce prose, so a schema
+            # run that reaches here has nothing to honour its contract with.
+            _watch_finish(rid, "error", "(no structured output)", time.time() - start)
+            raise RuntimeError(
+                "agy produced no structured result object for a --json-schema run "
+                "(it fell back to plain text). The schema contract cannot be met, and "
+                "returning prose to a caller that asked for a shape would fail at their "
+                "end instead of here."
+            )
 
         resolved_conv = (
             pinned_conv or (stream.conv_id if stream else None) or (feed.conv if feed else None)
@@ -2955,6 +3264,8 @@ async def antigravity_ask(
     model: Optional[str] = None,
     timeout_s: int = 180,
     watch: bool = False,
+    plan: bool = False,
+    schema: Optional[Union[dict, str]] = None,
     ctx: Optional[Context] = None,
 ) -> str:
     """Ask Antigravity (agy CLI, Gemini by default) a question in a NEW conversation.
@@ -2970,25 +3281,76 @@ async def antigravity_ask(
                    Choose an existing project dir for context-aware responses.
         model: Optional model slug to run this conversation on (agy's --model),
                e.g. "gemini-3.1-pro-high" or "claude-sonnet-4-6". Omit to use the
-               model set in agy's settings.json (gemini-3.6-flash-high by
+               model set in agy's settings.json (gemini-3.7-flash-high by
                default). Must be one of `agy models` — an unknown slug is
                rejected up front (agy would otherwise silently ignore it and fall
                back to the default). agy 1.1.5 replaced the old human labels
-               ("Gemini 3.1 Pro (High)") with these slugs and 1.1.6 added the
-               gemini-3.6-flash family; the old form is no longer accepted. See
-               antigravity_status / `agy models` for the valid slugs.
+               ("Gemini 3.1 Pro (High)") with these slugs, and the default has
+               since moved to the gemini-3.7-flash family; the old form is no
+               longer accepted. See antigravity_status / `agy models` for the
+               valid slugs.
         timeout_s: Max seconds to wait for agy to complete. Default 180.
         watch: If true, open a live "watch" view in your browser that streams
                agy's steps (narration + the real commands it runs) as it works.
                agy still runs headless; the same final text is returned. Best-
                effort and cross-platform — if the browser can't open, the run
                completes normally. Default false.
+        plan: If true, run agy in PLAN mode (agy 1.1.12+): it investigates and
+              writes an implementation plan instead of touching anything. Verified
+              on 1.1.20 that a file write and a shell command are both refused and
+              diverted into a plan document under agy's own directory — even when
+              the prompt insists, and even though the bridge still passes
+              --dangerously-skip-permissions — while file READS answer normally.
+              Use it to point Antigravity at a repo you don't want it editing.
+              Two caveats. It is agent-enforced, not an OS sandbox: it constrains
+              agy's agent loop, so treat it as a strong default rather than a
+              boundary you'd rely on against a hostile prompt (Codex has the real
+              one — see codex_ask's sandbox). And it is exclusive with the bridge's
+              slash-command shield, because agy silently disables plan mode when
+              that shield is on; a prompt whose first token is a slash command is
+              therefore rejected up front rather than run. Raises on agy older than
+              1.1.12, which ignores --mode in print mode, rather than silently
+              running your prompt unrestricted. Default false.
+        schema: Optional JSON Schema (an object, or its JSON text). When given, agy
+                is asked to produce output matching it (agy 1.1.8's --json-schema)
+                and this tool returns the VALIDATED OBJECT as JSON text instead of
+                prose — json.loads it. What comes back is agy's own
+                `structured_output`, which carries exactly the declared fields;
+                agy's prose `response` on the same run also picks up its internal
+                toolAction/toolSummary keys and can be prefixed with a sentence, so
+                the two are NOT interchangeable. If agy produces no structured
+                output the call RAISES rather than handing back prose you would
+                have to parse anyway. Needs agy 1.1.8+.
+
+                IMPORTANT — write the prompt so the ANSWER is in the turn, and let
+                the schema only shape it. agy fills the schema in a finishing pass
+                that does not re-reason about the content, so a field the turn never
+                established gets guessed from the schema itself. Measured on 1.1.20
+                with "this broke my build and wasted my whole afternoon": with
+                enum ["positive","negative"] it answered "positive" 3 times out of 4,
+                and simply REVERSING the enum to ["negative","positive"] flipped it
+                to "negative" 2 out of 2 — it was following field order, not the
+                sentence. Adding a `reason` field did not help; the reason came back
+                "Completed sentiment classification task." Asking the prompt to state
+                the verdict and why, and keeping the same biased enum, was correct
+                3 out of 3. So: extraction of what the model has already worked out
+                is reliable; a judgment delegated to the schema is not.
     """
     ws = _normalize_workspace(workspace)
     validate_model(model)  # fail fast on a typo (agy would silently ignore it)
+    if plan:
+        _check_plan_mode(prompt)  # refuses rather than downgrading; see _agy_base_args
+    schema_text = None
+    if schema is not None:
+        _check_schema_support()
+        schema_text = _normalize_json_schema(schema)
     if watch:
-        return await asyncio.to_thread(_run_agy_watched, prompt, ws, False, timeout_s, model)
-    return await _run_with_progress(_run_agy, (prompt, ws, False, timeout_s, model), ctx, timeout_s)
+        return await asyncio.to_thread(
+            _run_agy_watched, prompt, ws, False, timeout_s, model, plan, schema_text
+        )
+    return await _run_with_progress(
+        _run_agy, (prompt, ws, False, timeout_s, model, plan, schema_text), ctx, timeout_s
+    )
 
 
 @mcp.tool(
@@ -3005,6 +3367,8 @@ async def antigravity_continue(
     model: Optional[str] = None,
     timeout_s: int = 180,
     watch: bool = False,
+    plan: bool = False,
+    schema: Optional[Union[dict, str]] = None,
     ctx: Optional[Context] = None,
 ) -> str:
     """Continue the Antigravity conversation rooted at this workspace.
@@ -3028,12 +3392,31 @@ async def antigravity_continue(
         timeout_s: Max seconds to wait for agy to complete. Default 180.
         watch: If true, open a live "watch" view in your browser that streams
                agy's steps as it works (same return value, best-effort). Default false.
+        plan: If true, run this turn in agy's PLAN mode (1.1.12+) — it investigates
+              and writes an implementation plan instead of editing files or running
+              commands, while reads still work. Per-invocation like `model`, so a
+              follow-up can plan even if the original ask was unrestricted. See
+              antigravity_ask's `plan` for what it does and does not guarantee.
+              Default false.
+        schema: Optional JSON Schema for this turn — returns the validated object as
+                JSON text instead of prose. Per-invocation like `model` and `plan`.
+                See antigravity_ask's `schema`. Needs agy 1.1.8+.
     """
     ws = _normalize_workspace(workspace)
     validate_model(model)  # fail fast on a typo (agy would silently ignore it)
+    if plan:
+        _check_plan_mode(prompt)  # refuses rather than downgrading; see _agy_base_args
+    schema_text = None
+    if schema is not None:
+        _check_schema_support()
+        schema_text = _normalize_json_schema(schema)
     if watch:
-        return await asyncio.to_thread(_run_agy_watched, prompt, ws, True, timeout_s, model)
-    return await _run_with_progress(_run_agy, (prompt, ws, True, timeout_s, model), ctx, timeout_s)
+        return await asyncio.to_thread(
+            _run_agy_watched, prompt, ws, True, timeout_s, model, plan, schema_text
+        )
+    return await _run_with_progress(
+        _run_agy, (prompt, ws, True, timeout_s, model, plan, schema_text), ctx, timeout_s
+    )
 
 
 @mcp.tool(
@@ -3153,12 +3536,21 @@ def agent_swarm(
                           (alias "xai"; EXPERIMENTAL — see grok_ask) (required)
                - prompt:  the question or instruction (required)
                - workspace: working dir for that worker (default: server cwd)
-               - sandbox: Codex/Copilot/Cursor/Grok only — "read-only" (default),
-                          "workspace-write", or "danger-full-access". Ignored for
-                          Antigravity. (Codex's is an enforced OS sandbox
+               - sandbox: "read-only" (default), "workspace-write", or
+                          "danger-full-access". Codex's is an enforced OS sandbox
                           everywhere; Grok's is enforced on Linux/macOS only;
                           Copilot's and Cursor's are agent/tool-level, not OS
-                          boundaries — see copilot_ask / cursor_ask / grok_ask.)
+                          boundaries — see copilot_ask / cursor_ask / grok_ask.
+                          ANTIGRAVITY is the odd one: "read-only" maps to agy's
+                          plan mode (it investigates and writes a plan instead of
+                          editing files or running commands — see antigravity_ask's
+                          `plan`, and note it is agent-enforced, and needs agy
+                          1.1.12+), "danger-full-access" states plainly that the
+                          worker is unrestricted, and "workspace-write" is REFUSED
+                          because agy has no write scoping to offer. Omitting it
+                          leaves an Antigravity worker unrestricted — that is the
+                          long-standing default, unlike every other backend here,
+                          so fence it explicitly if you want it fenced.
                - model:   optional model override for ANY backend — Codex's `-m`,
                           Copilot's/Cursor's `--model`, Grok's `-m`, or
                           Antigravity's `--model` (an agy slug like

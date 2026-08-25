@@ -281,10 +281,10 @@ def test_normalize_tasks_codex_default_sandbox():
     assert out[0]["sandbox"] == codex_bridge.DEFAULT_SANDBOX
 
 
-def test_normalize_tasks_antigravity_honors_model_drops_sandbox(monkeypatch):
+def test_normalize_tasks_antigravity_keeps_model_and_full_access(monkeypatch):
+    """danger-full-access is agy's own posture said out loud: no plan mode."""
     import server
 
-    # agy has no sandbox (dropped), but --model now works in print mode (1.0.16).
     monkeypatch.setattr(server, "list_agy_models", lambda: ["gemini-3.1-pro-high"])
     out = swarm._normalize_tasks(
         [
@@ -296,8 +296,72 @@ def test_normalize_tasks_antigravity_honors_model_drops_sandbox(monkeypatch):
             }
         ]
     )
-    assert out[0]["sandbox"] is None
+    assert out[0]["sandbox"] == "danger-full-access"
+    assert out[0]["plan"] is False
     assert out[0]["model"] == "gemini-3.1-pro-high"
+
+
+def test_normalize_tasks_antigravity_omitted_sandbox_stays_unrestricted(monkeypatch):
+    """The long-standing default is deliberately left alone: flipping it would turn
+    every existing file-writing swarm task into a plan document.
+    """
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    out = swarm._normalize_tasks([{"backend": "antigravity", "prompt": "x"}])
+    assert out[0]["sandbox"] is None and out[0]["plan"] is False
+
+
+def test_normalize_tasks_antigravity_read_only_becomes_plan(monkeypatch):
+    """The footgun this closes: `sandbox: "read-only"` on an agy task used to be
+    silently ignored, so it ran completely unrestricted while reading as fenced.
+    """
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", True)
+    out = swarm._normalize_tasks(
+        [{"backend": "antigravity", "prompt": "review this", "sandbox": "read-only"}]
+    )
+    assert out[0]["plan"] is True
+
+
+def test_normalize_tasks_antigravity_rejects_workspace_write(monkeypatch):
+    """agy has no write scoping to offer — under its own --sandbox it still wrote
+    outside the declared workspace — so accepting this would promise a fence that
+    does not exist.
+    """
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    with pytest.raises(ValueError, match="task 0: antigravity cannot scope writes"):
+        swarm._normalize_tasks(
+            [{"backend": "antigravity", "prompt": "x", "sandbox": "workspace-write"}]
+        )
+
+
+def test_normalize_tasks_antigravity_plan_checked_before_any_worker_spawns(monkeypatch):
+    """Fail the whole swarm at normalization rather than N calls in: plan mode needs
+    the agy version gate AND the slash guard that replaces --disable-slash-commands.
+    """
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", True)
+    with pytest.raises(ValueError, match="task 0: plan mode cannot run a prompt"):
+        swarm._normalize_tasks(
+            [{"backend": "antigravity", "prompt": "/schedule nightly", "sandbox": "read-only"}]
+        )
+
+
+def test_normalize_tasks_antigravity_plan_refused_on_old_agy(monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", False)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: "1.1.11")
+    with pytest.raises(ValueError, match="task 0: plan=True needs agy 1.1.12"):
+        swarm._normalize_tasks([{"backend": "antigravity", "prompt": "x", "sandbox": "read-only"}])
 
 
 def test_normalize_tasks_antigravity_rejects_unknown_model(monkeypatch):
@@ -336,7 +400,7 @@ def test_swarm_agents_dispatches_by_backend(monkeypatch):
     monkeypatch.setattr(server, "list_agy_models", lambda: ["M1"])
     calls = []
 
-    def fake_text(index, prompt, workspace, model, timeout_s):
+    def fake_text(index, prompt, workspace, model, timeout_s, plan=False):
         calls.append(("antigravity", index, prompt, model))
         return swarm.WorkerResult(index, True, answer="agy:" + prompt, workspace=workspace)
 
@@ -554,8 +618,8 @@ def test_text_worker_uses_serialized_path_when_isolation_is_off(monkeypatch, tmp
     monkeypatch.setattr(swarm, "_make_isolated_home", lambda: pytest.fail("must not isolate"))
     seen = {}
 
-    def fake_run_agy(prompt, ws, cont, timeout_s, model=None, pin=True):
-        seen.update(prompt=prompt, ws=ws, model=model, pin=pin)
+    def fake_run_agy(prompt, ws, cont, timeout_s, model=None, plan=False, pin=True):
+        seen.update(prompt=prompt, ws=ws, model=model, plan=plan, pin=pin)
         return "serial answer"
 
     monkeypatch.setattr(server, "_run_agy", fake_run_agy)
@@ -579,6 +643,59 @@ def test_text_worker_retries_serialized_after_an_auth_failure(monkeypatch, tmp_p
     assert res.ok and res.answer == "recovered"
     # ...and the process latches serialized mode, so worker 2..N skip the failure.
     assert swarm._ISOLATION_OK is False
+
+
+def test_text_worker_plan_reaches_the_isolated_argv(monkeypatch, tmp_path):
+    """The parallel path builds its OWN argv rather than going through _run_agy, so
+    plan mode has to be threaded to it explicitly or a fenced task runs unfenced.
+    """
+    seen = {}
+
+    class _Failed:  # fail after argv capture; the read path is not what's under test
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        return _Failed()
+
+    monkeypatch.setattr(swarm.subprocess, "run", fake_run)
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)  # the shield plan mode replaces
+    swarm._run_text_worker(0, "review this", str(tmp_path), None, 10, True)
+    argv = seen["args"]
+    assert argv[argv.index("--mode") + 1] == "plan"
+    assert "--disable-slash-commands" not in argv
+
+
+def test_text_worker_without_plan_keeps_the_slash_shield(monkeypatch, tmp_path):
+    seen = {}
+
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(
+        swarm.subprocess, "run", lambda args, **k: (seen.update(args=args), _Failed())[1]
+    )
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
+    swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
+    assert "--mode" not in seen["args"]
+    assert "--disable-slash-commands" in seen["args"]
+
+
+def test_text_worker_serialized_forwards_plan(monkeypatch, tmp_path):
+    """The macOS fallback path must carry the fence too, not just the isolated one."""
+    seen = {}
+
+    def fake_run_agy(prompt, ws, cont, timeout_s, model=None, plan=False, pin=True):
+        seen.update(plan=plan, pin=pin)
+        return "answer"
+
+    monkeypatch.setattr(server, "_run_agy", fake_run_agy)
+    res = swarm._run_text_worker_serialized(0, "hi", str(tmp_path), None, 10, 0.0, True)
+    assert res.ok and seen["plan"] is True and seen["pin"] is False
 
 
 def test_text_worker_does_not_retry_other_failures(monkeypatch, tmp_path):
