@@ -5,9 +5,15 @@ Third backend alongside the agy bridge (server.py) and the Codex bridge
 `copilot -p "<prompt>" -s` runs a prompt non-interactively and writes the clean
 final answer straight to STDOUT (the `-s/--silent` flag drops the usage stats),
 then exits. No transcript-scraping — we read the answer from stdout. Verified
-against copilot 1.0.69 on Windows (bumped from 1.0.68: 1.0.69 adds a `--resume`
-convenience flag the bridge doesn't use, and `--session-id` still both sets a
-fresh id and resumes it — re-verified live via a set-then-resume round-trip).
+against copilot 1.0.80 on Windows (bumped from 1.0.69, eleven releases in one
+step, with nothing to change). The one entry in 1.0.70-1.0.80 that could have
+reached this bridge was 1.0.71's "reject malformed --allow-tool and --deny-tool
+patterns with an error message", since read-only mode IS a pair of --deny-tool
+patterns — re-verified live on 1.0.80 that they still parse, that a workspace file
+read answers, and that a write is still refused ("Blocked: I can't write files in
+this environment", no file created). 1.0.79's BREAKING rename of the sandbox
+setting allowDevToolCaches -> allowDevToolAccess is a config key this bridge never
+reads. `--session-id` still both sets a fresh id and resumes it.
 
 MODELS. copilot offers NO non-interactive way to list them — there is no `models`
 subcommand and an invalid `--model` error names no alternatives — so unlike the agy

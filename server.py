@@ -521,7 +521,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.27.0"
+__version__ = "0.28.0"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -3305,7 +3305,9 @@ async def antigravity_ask(
               Two caveats. It is agent-enforced, not an OS sandbox: it constrains
               agy's agent loop, so treat it as a strong default rather than a
               boundary you'd rely on against a hostile prompt (Codex has the real
-              one — see codex_ask's sandbox). And it is exclusive with the bridge's
+              one — see codex_ask's sandbox, and its Windows caveat: as of codex
+              0.149.1 a sandboxed run there refuses every command and answers
+              anyway). And it is exclusive with the bridge's
               slash-command shield, because agy silently disables plan mode when
               that shield is on; a prompt whose first token is a slash command is
               therefore rejected up front rather than run. Raises on agy older than
@@ -3685,6 +3687,15 @@ async def codex_ask(
                  workspace), or "danger-full-access" (no sandbox — avoid). `codex
                  exec` has no interactive approval gate, so this is the real safety
                  boundary; opt into write access deliberately.
+
+                 WINDOWS CAVEAT (codex 0.149.1): sandboxed runs there currently
+                 refuse EVERY command, both policies, down to `pwd` — codex's
+                 policy engine cannot classify the `pwsh -Command <...>` wrapper it
+                 builds. Shell commands are how codex reads files, so it sees none
+                 of the workspace and ANSWERS ANYWAY, from its own knowledge or a
+                 web search, with no hint that it read nothing. The bridge appends
+                 a visible "[agent-intern] WARNING" to any answer whose run had
+                 commands refused: if you see it, treat the answer as unsourced.
         model: Optional model override (`-m`); omit to use codex's configured default.
         timeout_s: Max seconds to wait for codex to complete. Default 180.
         watch: If true, open a live "watch" view in your browser that streams

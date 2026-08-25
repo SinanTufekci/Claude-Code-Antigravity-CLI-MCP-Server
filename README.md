@@ -14,8 +14,8 @@
 [![MCP server](https://img.shields.io/badge/MCP-server-7c3aed)](https://modelcontextprotocol.io/)
 [![Glama](https://glama.ai/mcp/servers/SinanTufekci/agent-intern/badges/score.svg)](https://glama.ai/mcp/servers/SinanTufekci/agent-intern)
 [![agy 1.1.20 verified](https://img.shields.io/badge/agy-1.1.20%20verified-2ea44f)](https://antigravity.google/)
-[![codex 0.144.1 verified](https://img.shields.io/badge/codex--cli-0.144.1%20verified-2ea44f)](https://developers.openai.com/codex/)
-[![copilot 1.0.69 verified](https://img.shields.io/badge/copilot--cli-1.0.69%20verified-2ea44f)](https://docs.github.com/en/copilot/how-tos/copilot-cli)
+[![codex 0.149.1 verified](https://img.shields.io/badge/codex--cli-0.149.1%20verified-2ea44f)](https://developers.openai.com/codex/)
+[![copilot 1.0.80 verified](https://img.shields.io/badge/copilot--cli-1.0.80%20verified-2ea44f)](https://docs.github.com/en/copilot/how-tos/copilot-cli)
 [![cursor 2026.07.23 verified](https://img.shields.io/badge/cursor--agent-2026.07.23%20verified-2ea44f)](https://cursor.com/cli)
 [![grok 1.0.3 unverified](https://img.shields.io/badge/grok--build-1.0.3%20UNVERIFIED-orange)](#experimental-backends)
 [![kimi 0.29.1 unverified](https://img.shields.io/badge/kimi--code-0.29.1%20UNVERIFIED-orange)](#experimental-backends)
@@ -826,7 +826,7 @@ a real restriction, but an agent-enforced one, so it does not change the default
   on `plan=True` created nothing at all, answering with a plan document. File reads still work, so
   it is genuinely useful rather than merely inert. Note what it is **not**: it constrains agy's agent
   loop, so it is agent-enforced like Copilot's and Cursor's modes, **not** an OS boundary — for that,
-  use Codex. Two consequences worth knowing: it survives `--dangerously-skip-permissions` (which the
+  use Codex (with the Windows caveat in [Security](#security) firmly in mind). Two consequences worth knowing: it survives `--dangerously-skip-permissions` (which the
   bridge still passes, because dropping it would soft-deny the reads plan mode exists to allow), and
   it is **mutually exclusive with the slash-command shield** — agy silently disables plan mode when
   `--disable-slash-commands` is present, so the bridge drops that flag and rejects a prompt whose
@@ -844,6 +844,19 @@ that codex enforces:
 
 Because there's no approval prompt, the flag you pass **is** the safety decision — choose it per
 call.
+
+> ⚠️ **On Windows, as of codex 0.149.1, that boundary is currently too tight to be useful — and it
+> fails silently.** Every command is refused under **both** `read-only` and `workspace-write` (down
+> to `pwd`) with `rejected: blocked by policy`: codex's policy engine can't classify the
+> `pwsh -Command <...>` wrapper codex itself builds. Shell commands are how codex reads files, so a
+> sandboxed run sees **nothing** of your workspace — and says nothing about it. Asked for the version
+> in a local `pyproject.toml` declaring `0.27.0`, it web-searched and answered **`1.2.0`** from an
+> unrelated GitHub repo; with the sandbox off, `0.27.0`. Exit 0 both times. Known upstream
+> ([#40060](https://github.com/openai/codex/issues/40060),
+> [#38886](https://github.com/openai/codex/issues/38886)). The bridge can't fix it, but it no longer
+> launders it: any answer whose run had commands refused comes back with a visible
+> `[agent-intern] WARNING` naming the count. Until it's fixed upstream, treat a sandboxed codex
+> answer on Windows as unsourced unless that warning is absent.
 
 ### Copilot — best-effort, not an OS sandbox
 
@@ -1114,6 +1127,43 @@ running **serialized** in your real HOME — correct, but without the speedup. W
   so a diagnostic advertised as free would quietly spend a call. The probe is the one bridge call
   that deliberately **omits** `--disable-slash-commands` (a regression test asserts it), and it
   degrades to nothing on older agy rather than reporting a false problem.
+- 🐛 **codex's Windows sandbox refuses every command — and codex answers anyway.** Re-verifying the
+  bridge against **codex 0.149.1** (from 0.144.1) turned up the worst failure shape there is: one
+  that reports success. Under **both** `read-only` and `workspace-write`, every command codex tried
+  came back `rejected: blocked by policy` — down to `pwd` — because the policy engine can't classify
+  the `pwsh -Command <...>` wrapper codex itself builds. Shell commands are how codex reads files, so
+  it saw nothing of the workspace. It did not say so. Asked for the version in a local
+  `pyproject.toml` declaring `0.27.0`, it ran a **web search** and answered **`1.2.0`**, a version
+  from an unrelated GitHub repository; a second run said `0.1.0`. With the sandbox off, the same
+  prompt answered `0.27.0`. Exit 0 and a full `-o` file every time. Not local: there is no exec
+  policy in this machine's `config.toml`, and it is open upstream
+  ([#40060](https://github.com/openai/codex/issues/40060),
+  [#38886](https://github.com/openai/codex/issues/38886)).
+
+  The bridge can't fix a CLI that reports success, but it no longer passes the result off as sound:
+  any answer whose run had commands refused now comes back with a visible `[agent-intern] WARNING`
+  naming the count and the policy. It **appends rather than raises** on purpose — under `read-only` a
+  model that tries to write is *supposed* to be blocked, and that run's answer is perfectly good;
+  what was unacceptable was the silence.
+
+- 🐛 **`codex_continue` was broken outside a git repo — fixed.** `codex exec resume` enforces the
+  trusted-directory check just like a fresh run, and the bridge passed `--skip-git-repo-check` only
+  on fresh runs, on the reasoning that resume inherits the session's recorded cwd and sandbox. So a
+  continue in a plain directory died with *"Not inside a trusted directory and
+  --skip-git-repo-check was not specified"* — while the fresh ask that created that very session had
+  just succeeded. It only bit outside a git repo, which is why a green hermetic suite and everyday
+  use inside a project never saw it; the test that covered this argv actively asserted the flag was
+  absent. `codex exec resume --help` lists it, so the fix is the supported one. Re-verified live: ask
+  then continue in a non-git workspace now both answer.
+
+- ✅ **Re-verified copilot on 1.0.80 (from 1.0.69) — eleven releases, nothing to change.** The one
+  entry that could have reached this bridge was 1.0.71's *"reject malformed `--allow-tool` and
+  `--deny-tool` patterns with an error message"*, since read-only mode **is** a pair of `--deny-tool`
+  patterns. Re-verified live on 1.0.80: they still parse, a workspace file read answers, and a write
+  is still refused (*"Blocked: I can't write files in this environment"*, no file created). 1.0.79's
+  BREAKING rename of the sandbox setting `allowDevToolCaches` → `allowDevToolAccess` is a config key
+  this bridge never reads.
+
 - ✅ **`agent_swarm` honours `sandbox` on Antigravity workers — it used to ignore it.** Every other
   backend took a per-task `sandbox` policy; Antigravity dropped the key on the floor, so
   `{"backend": "agy", "sandbox": "read-only"}` was a task that *looked* fenced and ran with nothing
@@ -1346,9 +1396,16 @@ running **serialized** in your real HOME — correct, but without the speedup. W
   stdout answer), `create-chat` + `-p --resume <id>`, `--model` (validated against `cursor-agent
   models`), `--output-format stream-json` (watch stream), and the
   `~/.cursor/chats/<md5(workspace)>/<chat-id>/meta.json` layout the continue fallback reads are all in
-  place; live `cursor_ask` / `cursor_continue` round-trips + a mixed `agent_swarm` pass. (2026.07.09
-  is installed and `cursor_status` — found, logged in, chats dir — passes with flags/layout intact; a
-  fresh live round-trip was deferred, Cursor usage limit reached.)
+  place; live `cursor_ask` / `cursor_continue` round-trips + a mixed `agent_swarm` pass.
+
+  **The deferred live round-trip has since been done, on that same 2026.07.23.** It had been skipped
+  the first time because the Cursor account was at its usage limit, leaving the run path confirmed
+  only by structure. End-to-end through the bridge now: `cursor_ask` read a workspace file and
+  answered from it, `cursor_continue` resumed the pinned chat and recalled it, and a `read-only` run
+  refused to write — *"I'm in Ask mode … I can't create or write files"*, no file created — so
+  cursor's agent-enforced mode holds in practice and not just in `--help`. Every model id the docs
+  name still validates against the live list, which has grown from 193 ids to 204 with no CLI
+  release: the catalogue moves on its own, so `cursor-agent models` stays the only current answer.
 - 🖥️ **Console-detach** — before 1.0.15 agy `-p` wrote its answer to the *controlling terminal*,
   not stdout; under a TUI that text leaked into the host's prompt (seen on 1.0.9). 1.0.15 fixed this
   on Windows (stdout now carries the answer), but the bridge still spawns agy detached

@@ -17,9 +17,14 @@ rollout file that appeared during the run) and pin it to the workspace; a later
 `codex_continue` resumes the exact session with `codex exec resume <id>`. If the
 in-memory pin is gone (server restarted) we fall back to the newest rollout whose
 recorded cwd matches the workspace — the codex analogue of agy's
-last_conversations.json lookup. This is verified against codex-cli 0.144.1
-(flags, the rollout-*.jsonl session layout, and a live round-trip all unchanged
-from the 0.141.0 baseline).
+last_conversations.json lookup. This is verified against codex-cli 0.149.1
+(flags and the rollout-*.jsonl session layout unchanged from the 0.141.0 baseline;
+ask and resume both round-tripped live). 0.147.0 removed `codex exec --full-auto`,
+which this bridge never passed. One thing DID break on the way to 0.149.1 and is
+fixed here: `codex exec resume` enforces the trusted-directory check, so a resume
+in a non-git workspace died with "Not inside a trusted directory and
+--skip-git-repo-check was not specified" while the fresh ask that created the very
+same session succeeded. build_args now passes that flag on both paths.
 
 SECURITY. `codex exec` runs the model as an autonomous agent with no interactive
 approval gate. Unlike agy's no-op `--sandbox`, codex's `-s/--sandbox` is a REAL
@@ -27,6 +32,23 @@ boundary: the default `read-only` lets the agent read and answer but change
 nothing on disk; callers must opt into `workspace-write` (edit files under the
 workspace) or `danger-full-access` (no sandbox — avoid). Even so, only run it
 with trusted prompts on trusted content.
+
+WINDOWS, as of 0.149.1: that boundary is currently TOO tight to be useful, and
+fails in the worst possible way — silently. Every command is refused under BOTH
+`read-only` and `workspace-write`, down to `pwd`, with "rejected: blocked by
+policy" on stderr; the policy engine cannot classify the `pwsh -Command <...>`
+wrapper codex itself builds. Since shell commands are how codex reads files, a
+sandboxed run on Windows sees NOTHING of your workspace — and codex does not say
+so. Asked for the version in a local pyproject.toml declaring 0.27.0, it fell back
+to a WEB SEARCH and answered "1.2.0" from an unrelated GitHub repository (another
+run said "0.1.0"); with the sandbox off, the same prompt answered 0.27.0. Exit code
+0 and a full -o file both times. Known upstream (openai/codex #40060, #38886).
+
+Because codex reports success, the bridge cannot fix this — but it refuses to
+launder it: _policy_note appends a visible warning to any answer whose run had
+commands refused. It APPENDS rather than raises, because under `read-only` a model
+that tries to write is SUPPOSED to be blocked and that answer is fine; what is not
+fine is silence.
 """
 
 from __future__ import annotations
@@ -68,6 +90,48 @@ _UUID_RE = re.compile(
 # Strips the ANSI color codes codex wraps some output in (e.g. `login status`
 # prints "\x1b[31;1mLogged in using ChatGPT\x1b[0m").
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# codex logs a command its sandbox policy refused as, on one stderr line:
+#   ERROR codex_core::tools::router: error=exec_command failed for `"...pwsh.exe"
+#   -Command 'rg -n version pyproject.toml'`: CreateProcess { message:
+#   "Rejected(\"... rejected: blocked by policy\")" }
+# The run still EXITS 0 with a confident final message, which is the whole problem.
+_POLICY_BLOCK_RE = re.compile(r"rejected:\s*blocked by policy", re.I)
+
+
+def _policy_block_count(stderr: str) -> int:
+    """How many commands codex's sandbox policy refused to run."""
+    return len(_POLICY_BLOCK_RE.findall(stderr or ""))
+
+
+def _policy_note(blocked: int, sandbox: str) -> str:
+    """A visible warning to append when codex answered despite refused commands.
+
+    Appended rather than raised, deliberately. A refusal is not automatically a
+    failure: under `read-only` a model that TRIES to write is supposed to be
+    blocked, and that run's answer is perfectly good. What is not acceptable is
+    silence -- codex exits 0 and its final message never mentions that it could not
+    look at anything, so the bridge has to say it.
+
+    The failure this exists for, verified on codex 0.149.1 / Windows: EVERY command
+    was refused under both `read-only` and `workspace-write` (down to `pwd`),
+    because the policy engine cannot classify the `pwsh -Command <...>` wrapper
+    codex itself builds. Asked for the version in a local pyproject.toml declaring
+    0.27.0, codex could not read it, fell back to a WEB SEARCH, and answered "1.2.0"
+    from an unrelated GitHub repository -- with no hint that anything had gone
+    wrong. With the sandbox off the same prompt answered 0.27.0. Known upstream on
+    Windows (openai/codex #40060, #38886).
+    """
+    return (
+        f"\n\n---\n[agent-intern] WARNING: codex's sandbox refused to run {blocked} "
+        f'command(s) under sandbox={sandbox!r} ("blocked by policy"), and codex does '
+        "not mention this in its answer. If those were the commands it needed to read "
+        "your files, the answer above is not based on them -- codex falls back to its "
+        "own knowledge or a web search instead. On Windows this currently affects every "
+        "sandboxed run (see the README's codex section); a single refusal under "
+        "'read-only' may just be a blocked write, which is the sandbox working."
+    )
+
 
 # Text decoding for codex's subprocesses: it emits UTF-8, which bare text=True
 # would decode with the Windows locale codepage (cp1254/cp1252) and mangle on any
@@ -293,6 +357,15 @@ def build_args(
     session's recorded cwd/sandbox (codex's `resume` subcommand has no `-s`/`-C`),
     so it passes only the id, optional model override, the output file, and the
     prompt — the subprocess cwd is still set to the workspace by the caller.
+
+    `--skip-git-repo-check` goes on BOTH paths, though, because `codex exec resume`
+    enforces the trusted-directory check just like a fresh run does: verified on
+    0.149.1 that a resume in a plain (non-git, untrusted) workspace dies with
+    "Not inside a trusted directory and --skip-git-repo-check was not specified"
+    while the fresh ask that created the session succeeded. It only bit outside a
+    git repo, which is why a suite of hermetic tests and everyday use inside a
+    project never saw it. `codex exec resume --help` lists the flag, so this is the
+    supported fix rather than a workaround.
     `json_stream` adds `--json` so codex emits its events as JSONL on stdout (for
     watch mode); the final answer is still read from `output_file` either way.
     """
@@ -302,7 +375,8 @@ def build_args(
     if model:
         args += ["-m", model]
     if not resume_session:
-        args += ["-s", sandbox, "-C", workspace, "--skip-git-repo-check"]
+        args += ["-s", sandbox, "-C", workspace]
+    args += ["--skip-git-repo-check"]
     if json_stream:
         args += ["--json"]
     args += ["-o", output_file, prompt]
@@ -375,6 +449,10 @@ def run_codex(
                 "codex produced no final message (empty -o file and stdout). "
                 f"stderr: {(proc.stderr or '')[-300:]}"
             )
+
+        blocked = _policy_block_count(proc.stderr or "")
+        if blocked:
+            answer += _policy_note(blocked, sandbox)
 
         if not continue_conv and pin:
             sid = _capture_new_session(before)
@@ -486,6 +564,10 @@ def run_codex_streaming(
             raise RuntimeError(
                 f"codex produced no final message (empty -o file). stderr: {(stderr or '')[-300:]}"
             )
+
+        blocked = _policy_block_count(stderr)
+        if blocked:
+            answer += _policy_note(blocked, sandbox)
 
         if not continue_conv and pin:
             sid = _capture_new_session(before)

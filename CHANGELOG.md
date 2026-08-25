@@ -10,6 +10,60 @@ summary.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-25
+
+### Fixed
+
+- **`codex_continue` failed outside a git repository.** `codex exec resume` enforces codex's
+  trusted-directory check exactly like a fresh run, and `build_args` passed `--skip-git-repo-check`
+  only on the fresh path — on the reasoning that resume inherits the session's recorded cwd and
+  sandbox. A continue in a plain directory therefore died with *"Not inside a trusted directory and
+  --skip-git-repo-check was not specified"*, moments after the fresh ask that created that very
+  session had succeeded. It only bit outside a git repo, which is why hermetic tests and everyday use
+  inside a project never caught it — and the test covering that argv actively asserted the flag was
+  absent, so the suite was defending the bug. `codex exec resume --help` lists the flag; the fix is
+  the supported one. Verified live on codex 0.149.1: ask then continue in a non-git workspace both
+  answer.
+
+### Added
+
+- **The bridge now surfaces commands codex's sandbox refused.** Re-verifying against **codex 0.149.1
+  / Windows** found that every command is rejected under *both* `read-only` and `workspace-write`
+  (down to `pwd`) with `rejected: blocked by policy` — codex's policy engine cannot classify the
+  `pwsh -Command <...>` wrapper codex itself builds. Shell commands are how codex reads files, so a
+  sandboxed run sees nothing of the workspace **and answers anyway**: asked for the version in a
+  local `pyproject.toml` declaring `0.27.0`, it web-searched and returned `1.2.0` from an unrelated
+  GitHub repository (another run: `0.1.0`); with the sandbox off, `0.27.0`. Exit 0 and a full `-o`
+  file every time. Known upstream (openai/codex #40060, #38886) and not local — this machine's
+  `config.toml` carries no exec policy.
+
+  A CLI that reports success cannot be fixed from here, but it should not be laundered either, so any
+  answer whose run had commands refused now carries a visible `[agent-intern] WARNING` naming the
+  count and the sandbox. It **appends rather than raises**: under `read-only` a model that tries to
+  write is supposed to be blocked, and that run's answer is fine — the problem was never the refusal,
+  it was the silence.
+
+### Changed
+
+- **Closed the standing cursor verification gap, on the same cursor-agent 2026.07.23.** The bridge
+  shipped saying a live agent turn could not be re-verified there — the Cursor account was at its
+  usage limit — so the run path was confirmed only structurally. It has now been exercised
+  end-to-end: an ask read a workspace file and answered from it, a continue resumed the pinned chat
+  and recalled it, and a `read-only` run refused to write ("I'm in Ask mode … I can't create or write
+  files") with no file created, so cursor's agent-enforced mode holds in practice and not just in
+  `--help`. Every model id the docs name still validates; the catalogue has grown from 193 ids to 204
+  with no CLI release, which is why `cursor-agent models` stays the only current answer.
+
+- **Re-verified codex on 0.149.1 (from 0.144.1) and copilot on 1.0.80 (from 1.0.69).** Badges bumped.
+  Neither CLI self-updates, so nothing broke on an existing install — the exposure was to anyone
+  installing today. codex 0.147.0 removed `codex exec --full-auto`, which this bridge never passed.
+  For copilot the one entry that could have reached the bridge was 1.0.71's *"reject malformed
+  `--allow-tool` and `--deny-tool` patterns"*, since read-only mode **is** a pair of `--deny-tool`
+  patterns: re-verified live that they still parse, that a workspace read answers, and that a write
+  is still refused. 1.0.79's BREAKING `allowDevToolCaches` → `allowDevToolAccess` rename is a config
+  key this bridge never reads.
+
+
 ## [0.27.0] - 2026-08-25
 
 ### Added
@@ -1268,7 +1322,8 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.0...v0.25.1

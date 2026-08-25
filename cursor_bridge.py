@@ -10,13 +10,22 @@ cursor-agent 2026.07.23 on Windows (bumped from 2026.07.08). Everything the brid
 depends on structurally still holds — `create-chat` mints an id, `models` lists,
 `status` reports auth, every flag we pass is still in --help, and the on-disk
 chats/<id>/meta.json cwd layout the continue fallback reads is unchanged. The one
-real change was the MODEL LIST: 2026.07.23 reshuffled it (193 ids), retiring
+real change was the MODEL LIST: 2026.07.23 reshuffled it (193 ids at the time,
+204 when last counted — the catalogue moves without a CLI release), retiring
 `sonnet-4-thinking` and the bare `claude-opus-4-8` that our docs named as examples,
 and it now bakes effort/speed into the id (…-low/-high/-xhigh/-max, each with a
 -fast twin). See validate_model for why that also loosened validation to accept a
-family base. NOTE: a live agent turn could not be re-verified on 2026.07.23 — the
-account was at its Cursor usage limit — so the run path itself is confirmed only by
-structure and by the bridge cleanly surfacing cursor's own limit error.
+family base; every model id the docs still name was re-checked against the live
+list and all of them validate.
+
+The live-turn gap is now CLOSED. That NOTE used to say a real agent turn could not
+be re-verified on 2026.07.23 because the account sat at its Cursor usage limit, so
+the run path was confirmed only structurally. It has since been exercised
+end-to-end through the bridge on that same version: an ask read a workspace file
+and answered from it, a continue resumed the pinned chat and recalled it, and a
+`read-only` run refused to write ("I'm in Ask mode … I can't create or write
+files") with no file created — so cursor's agent-enforced mode holds in practice,
+not just in --help.
 
 CONTINUE / RESUME. cursor-agent has a `create-chat` command that mints a new chat
 and prints its id, plus a `--resume <chatId>` flag that resumes an existing chat.

@@ -88,9 +88,23 @@ def test_build_args_resume_omits_sandbox_and_cd():
     assert args[3] == SAMPLE_SID
     assert "-s" not in args
     assert "-C" not in args
-    assert "--skip-git-repo-check" not in args
     assert args[args.index("-o") + 1] == "o.txt"
     assert args[-1] == "again"
+
+
+def test_build_args_resume_keeps_skip_git_repo_check():
+    """This assertion used to say the opposite, and that is what the bug was.
+
+    `codex exec resume` enforces the trusted-directory check exactly like a fresh
+    run: verified on 0.149.1 that a resume in a plain non-git workspace died with
+    "Not inside a trusted directory and --skip-git-repo-check was not specified"
+    while the fresh ask that created that very session succeeded. It only bites
+    outside a git repo, which is why hermetic tests and everyday use inside a
+    project never caught it. `codex exec resume --help` lists the flag.
+    """
+    args = codex_bridge.build_args("again", "ws", "read-only", None, SAMPLE_SID, "o.txt")
+    assert "--skip-git-repo-check" in args
+    assert args.index("--skip-git-repo-check") < args.index("-o")
 
 
 def test_build_args_resume_with_model():
@@ -403,3 +417,68 @@ def test_watch_lines_file_change():
 def test_watch_lines_ignores_noise():
     assert server._codex_event_to_watch_lines({"type": "turn.completed", "usage": {}}) == []
     assert server._codex_event_to_watch_lines({"type": "thread.started"}) == []
+
+
+# --------------------------------------------------------------------------
+# Sandbox policy refusals: codex exits 0 and never mentions them
+# --------------------------------------------------------------------------
+
+# One stderr line in the real shape codex logs (0.149.1): the marker the bridge
+# keys on is the trailing "rejected: blocked by policy".
+_BLOCKED_LINE = (
+    "ERROR codex_core::tools::router: error=exec_command failed for "
+    "`pwsh.exe -Command 'rg -n version pyproject.toml'`: "
+    "CreateProcess { message: Rejected(... rejected: blocked by policy) }"
+)
+TWO_BLOCKED = _BLOCKED_LINE + chr(10) + _BLOCKED_LINE
+
+
+def _fake_run(answer, stderr="", rc=0):
+    """A codex that writes `answer` to its -o file and exits with `rc`."""
+
+    def run(args, **kwargs):
+        Path(args[args.index("-o") + 1]).write_text(answer, encoding="utf-8")
+        return subprocess.CompletedProcess(args, rc, stdout="", stderr=stderr)
+
+    return run
+
+
+def test_policy_block_count_counts_refusals():
+    assert codex_bridge._policy_block_count(TWO_BLOCKED) == 2
+    assert codex_bridge._policy_block_count("nothing interesting") == 0
+    assert codex_bridge._policy_block_count("") == 0
+
+
+def test_run_codex_flags_policy_blocked_commands(tmp_path, monkeypatch):
+    """The silent-wrong-answer case, which is the reason this exists.
+
+    Verified on codex 0.149.1 / Windows: every command was refused under both
+    sandbox modes, codex could not read the workspace, fell back to a web search,
+    and answered with a version from an unrelated repository — exit 0, non-empty
+    -o file, and not a word about it in the answer.
+    """
+    monkeypatch.setattr(codex_bridge, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(codex_bridge.subprocess, "run", _fake_run("1.2.0", TWO_BLOCKED))
+    out = codex_bridge.run_codex("p", str(tmp_path), "read-only", None, False, 30, pin=False)
+    assert out.startswith("1.2.0")  # the answer is still returned, not swallowed
+    assert "WARNING" in out
+    assert "refused to run 2 command(s)" in out
+    assert "read-only" in out
+
+
+def test_run_codex_stays_quiet_without_refusals(tmp_path, monkeypatch):
+    """A clean run must not grow a warning — this fires often enough to matter."""
+    monkeypatch.setattr(codex_bridge, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(codex_bridge.subprocess, "run", _fake_run("0.27.0", "some ordinary log"))
+    out = codex_bridge.run_codex("p", str(tmp_path), "read-only", None, False, 30, pin=False)
+    assert out == "0.27.0"
+
+
+def test_run_codex_appends_rather_than_raises(tmp_path, monkeypatch):
+    """Appended, not raised, on purpose: under read-only a model that TRIES to write
+    is supposed to be blocked, and that run's answer is perfectly good.
+    """
+    monkeypatch.setattr(codex_bridge, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(codex_bridge.subprocess, "run", _fake_run("the real answer", _BLOCKED_LINE))
+    out = codex_bridge.run_codex("p", str(tmp_path), "read-only", None, False, 30, pin=False)
+    assert out.startswith("the real answer")
