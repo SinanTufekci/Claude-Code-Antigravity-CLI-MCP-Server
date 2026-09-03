@@ -10,6 +10,25 @@ summary.
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-09-03
+
+### Fixed
+
+- **The startup update notice told most users to run a command they have no repo for.** The bridge
+  announces an available update in two places, and they disagreed. The `bridge version` row in
+  `*_status` — the notice a user actually sees, in chat — said `upgrade: uvx agent-intern@latest`.
+  The startup warning said *"Update with `git pull` in the repo"*, which is the **source** install
+  only; the README's recommended path is `uvx agent-intern` from PyPI, where there is no repo and no
+  `git pull` to run. One codebase, two update notices, two different commands, and the wrong one
+  aimed at the majority.
+
+  The startup warning now names the uvx upgrade first and `git pull` second, for source installs.
+  Both existing tests asserted `"git pull"` and nothing else, so the suite was actively defending the
+  wrong advice — the same shape as 0.28.0's `--skip-git-repo-check` bug, where the test pinned the
+  defect in place. They now assert the uvx command, and a new guard pins the two notices **to each
+  other** rather than to a literal spelled twice, so the next edit to either one cannot silently
+  reintroduce the drift.
+
 ## [0.29.0] - 2026-09-03
 
 ### Changed

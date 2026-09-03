@@ -551,7 +551,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.29.0"
+__version__ = "0.29.1"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -729,6 +729,14 @@ def _update_warning(latest: Optional[tuple[int, int, int]]) -> Optional[str]:
     """Return a warning if `latest` is a newer bridge version than this file.
 
     None if no newer release is known, or if either version can't be parsed.
+
+    Names the uvx upgrade FIRST and the source one second, because that is the
+    order the install paths actually rank: the README recommends `uvx
+    agent-intern` from PyPI, and this message used to say only "git pull in the
+    repo" -- advice with no repo to run it in for the recommended install, and
+    advice that disagreed with the upgrade line _bridge_version_status prints in
+    chat. Two update notices in one codebase should not hand out different
+    commands, and the wrong one should not be the one aimed at most users.
     """
     current = _parse_agy_version(__version__)
     if latest is None or current is None or latest <= current:
@@ -736,8 +744,9 @@ def _update_warning(latest: Optional[tuple[int, int, int]]) -> Optional[str]:
     newest = ".".join(map(str, latest))
     return (
         f"A newer Agent Intern bridge is available: v{newest} "
-        f"(you are running v{__version__}). Update with `git pull` in the repo, "
-        "then restart Claude Code. Set AGY_BRIDGE_NO_UPDATE_CHECK=1 to silence this."
+        f"(you are running v{__version__}). Upgrade with `uvx agent-intern@latest`, "
+        "or `git pull` if you installed from source, then restart Claude Code. "
+        "Set AGY_BRIDGE_NO_UPDATE_CHECK=1 to silence this."
     )
 
 

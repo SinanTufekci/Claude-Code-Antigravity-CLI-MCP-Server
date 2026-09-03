@@ -359,12 +359,38 @@ def test_update_warning_warns_for_newer(monkeypatch):
     assert msg is not None
     assert "0.9.0" in msg  # the newer version available
     assert "0.8.0" in msg  # the version currently running
+    # The recommended install is `uvx agent-intern` from PyPI, so the uvx upgrade
+    # is the one most readers need; `git pull` stays for source installs. This
+    # assertion used to demand ONLY "git pull", which is why the suite was
+    # defending advice that had no repo to run it in.
+    assert "uvx agent-intern@latest" in msg
     assert "git pull" in msg
 
 
 def test_update_warning_none_for_equal(monkeypatch):
     monkeypatch.setattr(server, "__version__", "0.8.0")
     assert server._update_warning((0, 8, 0)) is None
+
+
+def test_both_update_notices_name_the_same_upgrade_command(monkeypatch):
+    # An available update is announced in TWO places: the stderr warning at
+    # startup (which only reaches the host's logs) and the `bridge version` row in
+    # *_status (the one a user actually sees). They drifted apart once — the
+    # status row said `uvx agent-intern@latest` while the startup warning still
+    # said to `git pull` in a repo the recommended install never creates. One
+    # codebase should not hand out two different upgrade commands, so pin them to
+    # each other rather than to a literal spelled twice.
+    monkeypatch.setattr(server, "__version__", "0.8.0")
+    monkeypatch.setattr(server, "_fetch_latest_release_version", lambda: (0, 9, 0))
+    monkeypatch.delenv("AGY_BRIDGE_NO_UPDATE_CHECK", raising=False)
+    warning = server._update_warning((0, 9, 0))
+    _, _, row = server._bridge_version_status()
+    assert warning is not None
+    for notice in (warning, row):
+        assert "0.9.0" in notice, f"update notice omits the new version: {notice!r}"
+        assert "uvx agent-intern@latest" in notice, (
+            f"update notice omits the upgrade command the other one gives: {notice!r}"
+        )
 
 
 def test_update_warning_none_for_older(monkeypatch):
@@ -1146,7 +1172,7 @@ def test_startup_checks_warns_on_newer_bridge_release(monkeypatch, caplog):
     caplog.set_level("WARNING", logger="agy_bridge")
     server._startup_checks()
     assert "0.9.0" in caplog.text
-    assert "git pull" in caplog.text
+    assert "uvx agent-intern@latest" in caplog.text
 
 
 def test_startup_checks_skips_update_check_when_disabled(monkeypatch, caplog):
