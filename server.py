@@ -23,7 +23,8 @@ must have logged in interactively at least once via the Antigravity IDE or
 `agy -i`. Uses the same AI Pro quota. The bridge itself only does cross-
 platform filesystem reads under `~/.gemini/antigravity-cli/`.
 
-Model: defaults to agy's settings.json "model" field (e.g. gemini-3.7-flash-high).
+Model: defaults to agy's settings.json "model" field (gemini-3.8-flash-high as of
+agy 1.1.25).
 agy 1.0.5 added a --model flag (and a `models` subcommand); through
 ~1.0.14 switching to a DIFFERENT model in -p HUNG the call (verified on 1.0.5:
 the active label returned in seconds, any other hung >60s), so the bridge kept
@@ -43,26 +44,42 @@ unchecked. `agy models` itself must be
 run with stdin closed (it blocks on an interactive terminal otherwise), same as
 -p is spawned with DEVNULL stdin.
 
-Model SLUGS (agy 1.1.5, list re-checked live on 1.1.20) — the label format CHANGED
+Model SLUGS (agy 1.1.5, list re-checked live on 1.1.25) — the label format CHANGED
 and every old example is now invalid. 1.1.5 introduced "stable, user-facing model
 slugs" that the /model picker shows and --model accepts, and `agy models` emits
 those slugs (bare through 1.1.10; as `<slug>\t<human label>` from 1.1.11 on — see
-_parse_models_output). The live list (re-read on 1.1.20) is:
-gemini-3.7-flash-{low,medium,high}, gemini-3.6-flash-{low,medium,high},
-gemini-3.5-flash-{low,medium,high}, gemini-3.1-pro-{low,high}, claude-sonnet-4-6,
+_parse_models_output). The live list (re-read on 1.1.25) is:
+gemini-3.8-flash-{low,medium,high}, gemini-3.7-flash-{low,medium,high},
+gemini-3.6-flash-{low,medium,high}, gemini-3.1-pro-{low,high}, claude-sonnet-4-6,
 claude-opus-4-6-thinking, gpt-oss-120b-medium — 1.1.6 ADDED the gemini-3.6-flash
-family and moved the settings.json default to it; the gemini-3.7-flash family then
-arrived by 1.1.16 and took the default with it. A profile with NO settings.json at
-all answers `-p "/model"` with gemini-3.7-flash-high (verified live on 1.1.20 in a
-throwaway HOME), so that — not 3.6 — is what an untouched install now runs. Neither
-move needed a code change, because validate_model reads the live list rather than
-a baked-in one; what rots is precisely this paragraph, and a docstring naming a
-superseded default is how a caller ends up reasoning about the wrong model. The old
-human labels ("Gemini 3.5 Flash (High)", "Claude Sonnet 4.6 (Thinking)") are GONE
-from the list, so
+family and moved the settings.json default to it, the gemini-3.7-flash family
+arrived by 1.1.16 and took the default in turn, and 1.1.25 added gemini-3.8-flash
+and moved the default onto THAT (verified live through this bridge: a call passing
+no `model` at all answered "Gemini 3.8 Flash").
+
+Two things about the 3.8 arrival are worth keeping. Its changelog entry scopes it
+to "when connecting with a `GEMINI_API_KEY`", but it is in the catalog on the
+ordinary AI Pro browser-auth path too — `agy models` lists all three effort
+variants there, and `--model gemini-3.8-flash-high` round-tripped clean through
+the bridge. And the same release quietly DROPPED the entire gemini-3.5-flash
+family, which NO changelog entry mentions (1.1.22 still named 3.5 Flash in a fix,
+and it was live on 1.1.20), so every 3.5 example in these docs had silently become
+a guaranteed rejection. Neither move needed a code change, because validate_model
+reads the live list rather than a baked-in one; what rots is precisely this
+paragraph, and a docstring naming a superseded default is how a caller ends up
+reasoning about the wrong model. That rot is what DOCUMENTED_AGY_MODELS in
+test_server.py exists to catch, and it caught this one from both sides — a
+documented slug agy had dropped, and a live family the docs never mentioned.
+
+The old human labels ("Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)") are
+GONE from the list, so
 validate_model rejects them — verified live on 1.1.5: the old label raised
 "unknown agy model ... expected one of: <slugs>" without spending a call, while
-`--model gemini-3.5-flash-high` round-tripped clean. Nothing in the bridge's
+the slug form round-tripped clean. Note that agy's settings.json `"model"` field
+is NOT that same surface: on this 1.1.25 install it holds the human label
+`Gemini 3.8 Flash (High)` and agy honors it (that is the default the no-`model`
+call above resolved through). Only `--model` requires a slug, so don't read a
+label in that file as a stale config. Nothing in the bridge's
 machinery had to change (validation was always format-agnostic, which is exactly
 why the whole suite stayed green through this break) — but every docstring and
 README example that named an old label was actively steering callers into a
@@ -521,7 +538,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.28.0"
+__version__ = "0.28.1"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -554,21 +571,33 @@ _AGY_LOCK = threading.Lock()
 # Newer agy releases may change paths/schemas (the SQLite migration is the known
 # risk), so we warn at startup if the installed agy is newer than this.
 #
-# 1.1.20 re-verification (live, Windows): ask and continue both round-tripped
-# through _run_agy with the real argv, the `--output-format json` object still
-# carries conversation_id/status/response, `agy models` still emits <slug>\t<label>,
-# the `/usage` quota table still parses, and supports_json_output /
-# supports_disable_slash_commands / supports_print_usage all resolve True. Two
-# upstream changes moved TOWARD this bridge's assumptions rather than away:
-# 1.1.18 made a dropped print-mode stream exit non-zero instead of reporting a
-# silent empty success, and 1.1.20 stopped treating benign tool errors and
-# permission denials as fatal -- so `returncode != 0` is now a truer failure
-# signal than it was when it was first relied on. 1.1.18 also made a valueless
-# `-p` and a stray trailing argument hard errors, which is exactly the mis-parse
-# _agy_base_args' ORDER MATTERS note was written to avoid; the prompt is still
-# `-p`'s value and still goes last (verified with a prompt whose first character
-# is a dash).
-VERIFIED_AGY_VERSION = (1, 1, 20)
+# 1.1.25 re-verification (live, Windows): ask round-tripped through _run_agy with
+# the real argv on both the default-model path and `--model gemini-3.8-flash-high`,
+# the `--output-format json` object still carries conversation_id/status/response,
+# `agy models` still emits <slug>\t<label>, the `/usage` quota table still parses
+# (antigravity_status reported both families at 100% without spending a call), and
+# the JSONL transcript read path still resolves. The ONLY drift in 1.1.21-1.1.25 is
+# the model catalog -- 3.8 in, 3.5 out -- which is data, not plumbing, and is
+# handled where it belongs (see the model-slug note above and
+# DOCUMENTED_AGY_MODELS).
+#
+# Two upstream fixes in this range landed directly on shapes this bridge relies on,
+# and both moved TOWARD it. 1.1.23 fixed subcommands such as `models` hanging on an
+# inherited, unclosed stdin -- exactly the hang list_agy_models has always spawned
+# with stdin=DEVNULL to dodge, so that workaround is now belt-and-braces rather
+# than load-bearing (it stays: the bridge still supports older agy). And 1.1.24
+# fixed headless runs with piped stdout/stderr hanging on EXIT, by setting
+# FD_CLOEXEC so a grandchild process can no longer hold the caller's pipes open;
+# every call here is `capture_output=True`, so that was a live timeout risk on the
+# bridge's own argv shape, absorbed until now only by the subprocess timeout.
+#
+# Watch out for one false alarm this range introduces: agy left an EMPTY brain dir
+# behind (no transcript, just empty .user_uploaded/ and scratch/) at the moment it
+# self-updated, and antigravity_status dutifully reported "newest transcript [!!]"
+# for it. The read path was fine -- the very next bridge call wrote a real
+# transcript and status went green -- so an empty newest-conversation is a stale
+# artifact, not a regression.
+VERIFIED_AGY_VERSION = (1, 1, 25)
 
 # First agy version whose print mode understands `--output-format json` (1.1.8).
 # Below this the flag is unknown to agy's parser, so the bridge must not pass it
@@ -1854,8 +1883,10 @@ def validate_model(model: Optional[str]) -> Optional[str]:
     — better than blocking a real model just because we couldn't enumerate them.
 
     Matching is EXACT against `agy models`, so agy 1.1.5's switch from human labels
-    ("Gemini 3.5 Flash (High)") to slugs (gemini-3.5-flash-high) is surfaced here as
-    a loud rejection listing the new names, not a silent run on the wrong model.
+    ("Gemini 3.1 Pro (High)") to slugs (gemini-3.1-pro-high) is surfaced here as a
+    loud rejection listing the new names, not a silent run on the wrong model. The
+    same exactness is what turns a model agy RETIRES into a loud failure rather
+    than a silent fallback — 1.1.25 dropped the whole gemini-3.5-flash family.
     """
     if not model:
         return model
@@ -3281,14 +3312,16 @@ async def antigravity_ask(
                    Choose an existing project dir for context-aware responses.
         model: Optional model slug to run this conversation on (agy's --model),
                e.g. "gemini-3.1-pro-high" or "claude-sonnet-4-6". Omit to use the
-               model set in agy's settings.json (gemini-3.7-flash-high by
-               default). Must be one of `agy models` — an unknown slug is
+               model set in agy's settings.json (gemini-3.8-flash-high as of agy
+               1.1.25). Must be one of `agy models` — an unknown slug is
                rejected up front (agy would otherwise silently ignore it and fall
                back to the default). agy 1.1.5 replaced the old human labels
                ("Gemini 3.1 Pro (High)") with these slugs, and the default has
-               since moved to the gemini-3.7-flash family; the old form is no
-               longer accepted. See antigravity_status / `agy models` for the
-               valid slugs.
+               since moved to the gemini-3.8-flash family; the old form is no
+               longer accepted. Note 1.1.25 also DROPPED the gemini-3.5-flash
+               family with no changelog entry, so a 3.5 slug you saw in older
+               docs is now rejected. See antigravity_status / `agy models` for
+               the valid slugs.
         timeout_s: Max seconds to wait for agy to complete. Default 180.
         watch: If true, open a live "watch" view in your browser that streams
                agy's steps (narration + the real commands it runs) as it works.

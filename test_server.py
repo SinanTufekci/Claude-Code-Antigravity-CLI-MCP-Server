@@ -1035,16 +1035,21 @@ def test_validate_model_skips_when_list_unavailable(monkeypatch):
 
 
 # Every model name our docs hand to callers, checked against the LIVE `agy models`.
-# agy 1.1.5 renamed all of them ("Gemini 3.5 Flash (High)" -> gemini-3.5-flash-high)
+# agy 1.1.5 renamed all of them ("Gemini 3.1 Pro (High)" -> gemini-3.1-pro-high)
 # and this suite stayed fully green, because every other model test mocks
 # list_agy_models and the plumbing is format-agnostic. Only the docstrings and
 # README broke — steering callers into a guaranteed rejection — so this is the test
 # that notices. Spends no AI Pro quota (`agy models` is a local subcommand) and
 # skips where agy isn't installed.
+#
+# It has now earned its keep twice over: agy 1.1.25 both ADDED the gemini-3.8-flash
+# family and DROPPED the gemini-3.5-flash one, and only the first of those appears
+# in any changelog entry. This pair of tests is the only thing in the repo that
+# fired on either.
 DOCUMENTED_AGY_MODELS = [
-    "gemini-3.7-flash-high",  # the default an untouched install runs, as of ~1.1.16
+    "gemini-3.8-flash-high",  # the default as of 1.1.25 (added the 3.8 family)
+    "gemini-3.7-flash-high",  # 1.1.16's default
     "gemini-3.6-flash-high",  # 1.1.6's default (added the gemini-3.6-flash family)
-    "gemini-3.5-flash-high",
     "gemini-3.1-pro-high",
     "claude-sonnet-4-6",
     "claude-opus-4-6-thinking",

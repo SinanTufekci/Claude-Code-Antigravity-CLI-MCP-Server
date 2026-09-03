@@ -10,6 +10,54 @@ summary.
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-09-03
+
+### Changed
+
+- **Re-verified against agy 1.1.25 (from 1.1.20) — five releases, no plumbing change, but the model
+  catalog moved in both directions.** `VERIFIED_AGY_VERSION` → `(1, 1, 25)`, so `antigravity_status`
+  stops reporting the installed agy as *"newer than verified"*.
+
+  Everything the bridge actually depends on still holds, re-checked live on Windows:
+  `antigravity_ask` round-tripped through the real argv on both the default-model path and an
+  explicit `--model`, agy's `--output-format json` object still carries
+  `conversation_id` / `status` / `response`, `agy models` still emits `<slug>\t<label>`, the `/usage`
+  quota table still parses into per-family rows, and the JSONL transcript read path still resolves.
+
+  The drift was data, not code:
+
+  - **`gemini-3.8-flash` arrived and took the default.** All three effort variants
+    (`gemini-3.8-flash-{low,medium,high}`) are live, and a bridge call passing no `model` at all now
+    answers as Gemini 3.8 Flash. agy's changelog scopes the new family to *"when connecting with a
+    `GEMINI_API_KEY`"*, but it is in the catalog on ordinary AI Pro browser auth too, and
+    `--model gemini-3.8-flash-high` round-tripped clean.
+  - **The entire `gemini-3.5-flash` family was dropped, and no changelog entry mentions it.** 1.1.22
+    was still naming 3.5 Flash in a fix note, so this is the same class of silent catalog change as
+    the 1.1.11 TSV break — every `gemini-3.5-*` example in these docs had quietly become a guaranteed
+    rejection for anyone who copied one.
+
+  Nothing broke, because `validate_model` reads the live list rather than a baked-in one. The two
+  guard tests added after the last catalog drift are what caught this, one per direction:
+  `test_documented_model_slugs_still_accepted_by_live_agy` failed on the dropped 3.5 slug and
+  `test_live_agy_model_families_are_all_documented` failed on the undocumented 3.8 family. Docstrings,
+  the README model list, and `DOCUMENTED_AGY_MODELS` now name 3.8 and no longer name 3.5.
+
+  Also recorded, though nothing had to move. Two upstream fixes in this range landed directly on
+  shapes this bridge relies on, and both moved *toward* it: **1.1.23** fixed subcommands such as
+  `models` hanging on an inherited, unclosed stdin — precisely the hang `list_agy_models` has always
+  spawned with `stdin=DEVNULL` to dodge, so that workaround is now belt-and-braces rather than
+  load-bearing (it stays, for older agy) — and **1.1.24** fixed headless runs with piped
+  stdout/stderr hanging *on exit* by setting `FD_CLOEXEC`, which is the shape of every call this
+  bridge makes (`capture_output=True`) and was a live timeout risk absorbed until now only by the
+  subprocess timeout. One false alarm to know about: agy leaves an **empty conversation directory**
+  behind when it self-updates (no transcript, just empty `.user_uploaded/` and `scratch/`), and
+  `antigravity_status` reports it as `newest transcript [!!]`; the read path is fine, and the next
+  real call writes a transcript and turns the row green.
+
+  Not adopted, and not exercised beyond confirming agy still lists them: 1.1.22's `/model <name>`,
+  1.1.21's `/voice` and status-line `cost` field, and the `always-proceed` permission mode. The
+  bridge's `--dangerously-skip-permissions` posture is unchanged.
+
 ## [0.28.0] - 2026-08-25
 
 ### Fixed
