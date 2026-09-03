@@ -492,10 +492,23 @@ Reach for these tools when:
 (antigravity_image_swarm for several at once).
 - a job splits into many independent sub-tasks — agent_swarm runs them in \
 parallel, mixing any backends in one call.
-- you want a heavier or different-family model's take, or want to offload grunt \
-work off your own token budget.
-Don't delegate what you can just answer: each call takes ~10-30s and spends the \
-user's quota.
+- the work is bulk and mechanical (a rename across 30 files, boilerplate, a \
+first-pass port) — cheap for a sub-agent, expensive in your context.
+- you want a heavier or different-family model's take: a second opinion on a \
+risky diff, or a design call where one model's blind spot is the whole risk.
+
+OFFER IT — don't wait to be asked. On a task that fits the triggers above, say \
+so in ONE line before you start: name the backend, the reason, and ask. \
+("This is 6 independent files — want me to farm it out to Gemini in parallel \
+instead of grinding through them here?") The user is paying for these plans \
+already; a delegation they never hear about is one they can never take. Then \
+respect the answer: ask ONCE per task, never once per turn, and if they decline, \
+drop it for the rest of that task. Delegate without asking only for images, or \
+where the user has already said to delegate this kind of work.
+
+Don't offer, and don't delegate, when the job is a couple of tool calls, when it \
+leans on context only this conversation has, or when the ~10-30s round trip costs \
+more than just doing it. A suggestion on every task is nagging, not help.
 
 Pick a backend:
 - antigravity_* (Gemini) — fast, cheap tool-calling; the ONLY image model. No \
@@ -538,7 +551,7 @@ mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.28.1"
+__version__ = "0.29.0"
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.

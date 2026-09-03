@@ -10,6 +10,37 @@ summary.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-03
+
+### Changed
+
+- **The server now tells the host model to OFFER delegation, instead of waiting to be asked.** The
+  `instructions` block every MCP client injects into its model's context described *when* delegation
+  fits and stopped there, which is a passive framing: it answers "may I?" but never prompts "should
+  I?". The practical result was that the bridge stayed invisible unless the user remembered it
+  existed and asked by name — six CLIs and a paid subscription behind them, reached only on demand.
+
+  The block now instructs the host to propose it in one line before starting a qualifying task, name
+  the backend and the reason, and **ask** — the user is paying for these plans, so a delegation they
+  never hear about is one they can never take. Two triggers were added alongside the existing ones,
+  because they are the cases that most reward a sub-agent and are easiest to miss: **bulk mechanical
+  work** (a rename across 30 files, boilerplate, a first-pass port), which is cheap for a sub-agent
+  and expensive in the host's context, and a **second opinion on a risky diff or design call**, where
+  one model family's blind spot is the entire risk.
+
+  The consent and anti-nag guardrails are part of the same change, not a footnote. The host is told
+  to ask **once per task, never once per turn**, to drop the subject for the rest of a task it was
+  declined on, and to delegate without asking only for images (the one thing it cannot do itself) or
+  where the user has already standing-approved that kind of work. It is also told explicitly *not* to
+  offer on a two-tool-call job, on work leaning on context only the conversation has, or where the
+  ~10-30s round trip costs more than doing it — a suggestion on every task is nagging, not help.
+
+  A guard test pins both halves, since each one alone is its own failure mode: "offer" without the
+  guardrail becomes a per-turn pitch or quota spent silently, and the guardrail without "offer" is
+  the old passive behaviour back again. MCP instructions are guidance rather than an enforced rule,
+  so the README's FAQ now also carries a **`CLAUDE.md` snippet** for anyone who wants this reliably
+  proactive — or, with the sentence reversed, reliably off.
+
 ## [0.28.1] - 2026-09-03
 
 ### Changed

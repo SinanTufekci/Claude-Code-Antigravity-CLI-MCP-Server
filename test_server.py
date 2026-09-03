@@ -3074,3 +3074,16 @@ def test_server_instructions_route_key_capabilities():
     instr = server.mcp.instructions.lower()
     for cue in ("antigravity_image", "agent_swarm", "workspace", "sandbox"):
         assert cue in instr, f"instructions omit the {cue!r} routing cue"
+
+
+def test_server_instructions_tell_the_host_to_offer_and_to_ask_first():
+    # The instructions used to only DESCRIBE when delegation fits, which left the
+    # bridge invisible unless the user thought to ask for it. They now tell the
+    # host model to propose it. Both halves are load-bearing and each one alone is
+    # a distinct failure: "offer" without the consent/anti-nag guardrail turns into
+    # a suggestion on every task (or quota spent silently), and the guardrail
+    # without "offer" is the old passive behaviour again.
+    instr = server.mcp.instructions.lower()
+    assert "offer it" in instr, "instructions no longer tell the host to propose delegation"
+    assert "and ask" in instr, "instructions no longer tell the host to ask before spending quota"
+    assert "once per task" in instr, "instructions lost the anti-nag rule"

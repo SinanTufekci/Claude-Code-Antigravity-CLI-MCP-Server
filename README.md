@@ -951,6 +951,35 @@ report "not found" via their `*_status` tool (`antigravity_status` / `codex_stat
 </details>
 
 <details>
+<summary><b>Claude never suggests delegating — can I make it offer on its own?</b></summary>
+
+It does now, by default. The server ships an `instructions` block that Claude Code loads with the
+tool list, and as of **0.29.0** that block tells it to **offer delegation in one line before
+starting** a task that fits — bulk mechanical work, a job that splits into independent parallel
+subtasks, or a second opinion on a risky diff — and to ask rather than just spend your quota.
+It's also told to ask **once per task, not once per turn**, and to drop it if you decline, because a
+suggestion on every task is nagging rather than help.
+
+MCP instructions are guidance, though, not a rule the harness enforces — so if you want it *reliably*
+proactive, put it where Claude Code treats it as an instruction. Add this to your project or global
+`CLAUDE.md`:
+
+```markdown
+## Delegating to sub-agents
+
+The `intern` MCP server bridges Antigravity/Gemini, Codex, Copilot and Cursor as sub-agents
+running on my own subscriptions. Before starting bulk mechanical work (a rename across many
+files, boilerplate, a first-pass port), or anything that splits into independent parallel
+subtasks, propose delegating it in one line and wait for my answer — e.g. "this is 6
+independent files, shall I farm it out to Gemini in parallel?". Pass `workspace` = the repo
+root. Don't propose it for small tasks or work that needs our conversation's context.
+```
+
+Turn it the other way — "never delegate without me asking first" — and that works too: the same
+file, the opposite sentence.
+</details>
+
+<details>
 <summary><b>When should I use Antigravity vs Codex vs Copilot vs Cursor vs Grok vs Kimi?</b></summary>
 
 Use **Antigravity** for fast, cheap tool-calling, quick answers, and **image generation** (it's the
