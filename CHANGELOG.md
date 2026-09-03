@@ -29,6 +29,21 @@ summary.
   other** rather than to a literal spelled twice, so the next edit to either one cannot silently
   reintroduce the drift.
 
+- **Nobody was hearing about updates at all, correct command or not.** Fixing the wording exposed the
+  bigger problem: of the two places a new release is announced, only one can reach a person. The
+  startup warning goes to **stderr**, which lands in the host's logs — the model never sees a
+  server's stderr, so Claude cannot mention what it was never shown, and a user would have to go
+  read `/mcp` logs to find it. The `*_status` row *does* reach the model, because it rides back as a
+  tool result — but only when something calls `*_status`, which in ordinary use may be never.
+
+  That leaves a user on the recommended install — `uvx agent-intern`, which pins to its cached
+  version and deliberately does **not** auto-upgrade — with no realistic way to learn an update
+  exists. The `instructions` block now closes the loop from the other end: when a `*_status` call
+  reports a newer release, the host is told to relay it to the user in one line with the upgrade
+  command. It uses the one channel that already works rather than adding a new one; notably it does
+  *not* staple the notice onto ordinary tool results, which would corrupt the validated JSON that
+  `antigravity_ask(schema=...)` returns.
+
 ## [0.29.0] - 2026-09-03
 
 ### Changed

@@ -3113,3 +3113,14 @@ def test_server_instructions_tell_the_host_to_offer_and_to_ask_first():
     assert "offer it" in instr, "instructions no longer tell the host to propose delegation"
     assert "and ask" in instr, "instructions no longer tell the host to ask before spending quota"
     assert "once per task" in instr, "instructions lost the anti-nag rule"
+
+
+def test_server_instructions_tell_the_host_to_relay_an_available_update():
+    # The bridge announces a new release in two places, and only one of them can
+    # reach a user: the startup warning goes to the host's LOGS, while the
+    # `bridge version` row rides a tool result into the model's context. So the
+    # host has to be told to pass it on — otherwise a user on the recommended
+    # (non-auto-upgrading) uvx install never hears that an update exists.
+    instr = server.mcp.instructions.lower()
+    assert "bridge version" in instr, "instructions no longer point at the update row"
+    assert "upgrade" in instr, "instructions no longer ask the host to relay the upgrade"

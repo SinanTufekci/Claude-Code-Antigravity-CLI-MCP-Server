@@ -265,8 +265,10 @@ path to hardcode, no `git pull` to remember:
 
 uvx pins to the version it first caches and does **not** auto-upgrade, so you never run an update you
 didn't choose — important, since the bridge runs [unsandboxed code](#security): a surprise (or
-compromised) release can't execute until you opt in. When the startup check warns that a newer
-release is out, upgrade deliberately and restart Claude Code:
+compromised) release can't execute until you opt in. You still get told when there's something to
+opt into: any `*_status` call reports whether a newer release is out, and Claude is instructed to
+pass that on when it sees it. (There's a startup check too, but it writes to stderr — that only
+reaches your MCP logs, not you.) Upgrade deliberately and restart Claude Code:
 
 ```bash
 uvx agent-intern@latest      # fetch + run the newest release (refreshes uv's cache)

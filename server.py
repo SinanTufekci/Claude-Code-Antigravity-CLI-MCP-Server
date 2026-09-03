@@ -539,7 +539,10 @@ one-shot (no continue).
 - watch=true opens a live browser view of the agent working (identical return \
 value).
 - *_status checks a backend is installed and logged in, and spends no quota — \
-use it if a call reports "not found".
+use it if a call reports "not found". Its `bridge version` row also says when a \
+NEWER bridge release is out; if it does, tell the user in one line and give the \
+upgrade command the row names. The startup notice for this only reaches the \
+host's logs, so relaying it is the one way they hear about it.
 
 Security: they all run as autonomous agents. Codex's sandbox is the only hard \
 boundary everywhere; grok's is a real one too, but only on Linux/macOS. Use only \
